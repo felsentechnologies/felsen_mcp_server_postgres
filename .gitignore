@@ -1,0 +1,50 @@
+/postgres-mcp
+postgres-mcp.exe
+*.exe
+*.test
+/tmp/
+/dist/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.local.env
+secrets.*
+secret.*
+*.secret
+*.secrets
+credentials.*
+credential.*
+*.credentials
+*.credential
+token.*
+*.token
+bearer-token.txt
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Local Docker/Portainer overrides
+Docker/*.local.yaml
+Docker/*.local.yml
+docker-compose.override.yaml
+docker-compose.override.yml
+
+# Database dumps and local backups
+*.sql
+*.dump
+*.bak
+*.backup
+*.tar
+*.tar.gz
+*.zip

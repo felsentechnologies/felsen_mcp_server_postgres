@@ -1,0 +1,17 @@
+services:
+  postgres-mcp:
+    image: ${IMAGE_NAME:-mcp-postgres}:latest
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile
+    environment:
+      POSTGRES_MCP_CONFIG: ${POSTGRES_MCP_CONFIG:-/app/Docker/config.docker.yaml}
+      CRM_DATABASE_URL: ${CRM_DATABASE_URL:?Set CRM_DATABASE_URL with the Postgres DSN to introspect}
+      DATABASE_URL: ${DATABASE_URL:-${CRM_DATABASE_URL}}
+      MCP_API_KEY: ${MCP_API_KEY:-${MCP_BEARER_TOKEN:-${HTTP_BEARER_TOKEN:-change-me-reader}}}
+      MCP_WRITER_API_KEY: ${MCP_WRITER_API_KEY:-${MCP_BEARER_TOKEN:-${HTTP_BEARER_TOKEN:-change-me-writer}}}
+      POSTGRES_MCP_API_KEY: ${POSTGRES_MCP_API_KEY:-${MCP_API_KEY:-change-me-reader}}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+    ports:
+      - "${HTTP_PORT:-${POSTGRES_MCP_PORT:-8080}}:8080"
+    restart: unless-stopped

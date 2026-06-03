@@ -1,0 +1,9 @@
+.git
+.gitignore
+postgres-mcp
+postgres-mcp.exe
+*.test
+tmp/
+dist/
+.env
+Docker/*.local.yaml
