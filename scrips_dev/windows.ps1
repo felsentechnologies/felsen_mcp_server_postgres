@@ -1,10 +1,9 @@
 param(
+    [string]$ProjectName = "mcp-postgres",
     [string]$ImageName = "mcp-postgres",
     [int]$HostPort = 8080,
-    [string]$BearerToken = "",
-    [string]$AllowedOrigins = "",
     [string]$DatabaseUrl = "",
-    [string]$WriterBearerToken = "",
+    [string]$McpApiKey = "",
     [string]$ImageTag = "latest",
     [string]$ComposeFile = "",
     [string]$ConfigPath = ""
@@ -19,10 +18,11 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = "/app/Docker/config.docker.yaml"
 }
 $Dockerfile = Join-Path $ProjectRoot "Docker\Dockerfile"
-$TokenDir = Join-Path $env:LOCALAPPDATA "FelsenTechnologies\mcp-postgres"
-$TokenFile = Join-Path $TokenDir "bearer-token.txt"
-$GeneratedBearerToken = $false
+$EnvFile = Join-Path $ProjectRoot ".env"
+$EnvExampleFile = Join-Path $ProjectRoot ".env.example"
 $LastComposeSucceeded = $false
+$DatabaseUrlWasProvided = -not [string]::IsNullOrWhiteSpace($DatabaseUrl)
+$McpApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpApiKey)
 
 function Write-Title {
     param([string]$Text)
@@ -51,193 +51,202 @@ function Test-Docker {
         return $true
     }
     catch {
-        Write-Host "Docker nao esta disponivel. Abra o Docker Desktop e tente novamente." -ForegroundColor Red
+        Write-Host "Docker nao esta disponivel ou sem permissao para este usuario." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor DarkGray
+        Write-Host "Abra o Docker Desktop, verifique se ele terminou de iniciar e confirme as permissoes do usuario." -ForegroundColor Yellow
         return $false
     }
 }
 
-function Test-ComposeFile {
-    if (-not (Test-Path -LiteralPath $script:ComposeFile)) {
-        Write-Host "Arquivo docker compose nao encontrado:" -ForegroundColor Red
-        Write-Host $script:ComposeFile -ForegroundColor Yellow
-        return $false
-    }
-    return $true
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function New-BearerToken {
-    $bytes = New-Object byte[] 32
+function Test-IsWindowsHost {
+    if (Get-Variable -Name IsWindows -Scope Global -ErrorAction SilentlyContinue) {
+        return $IsWindows
+    }
+    return [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+}
+
+function Initialize-EnvFile {
+    if (Test-Path -LiteralPath $EnvFile) {
+        return
+    }
+
+    Write-Title "Criar .env"
+    if (Test-Path -LiteralPath $EnvExampleFile) {
+        Copy-Item -LiteralPath $EnvExampleFile -Destination $EnvFile
+        Write-Host ".env criado a partir de .env.example" -ForegroundColor Green
+        return
+    }
+
+    Set-Content -LiteralPath $EnvFile -Value "" -NoNewline
+    Write-Host ".env criado vazio" -ForegroundColor Yellow
+}
+
+function New-DevSecret {
+    param([int]$Length = 32)
+
+    $buffer = [byte[]]::new($Length)
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     try {
-        $rng.GetBytes($bytes)
+        $rng.GetBytes($buffer)
     }
     finally {
         $rng.Dispose()
     }
-    return [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+    return [Convert]::ToBase64String($buffer).TrimEnd("=").Replace("+", "-").Replace("/", "_")
 }
 
-function Save-BearerToken {
-    if ([string]::IsNullOrWhiteSpace($script:BearerToken)) { return }
-    if (-not (Test-Path -LiteralPath $script:TokenDir)) {
-        New-Item -ItemType Directory -Path $script:TokenDir -Force | Out-Null
+function Read-EnvValues {
+    $values = @{}
+    if (-not (Test-Path -LiteralPath $EnvFile)) {
+        return $values
     }
-    Set-Content -LiteralPath $script:TokenFile -Value $script:BearerToken -NoNewline
-}
 
-function Initialize-BearerToken {
-    if ([string]::IsNullOrWhiteSpace($script:BearerToken)) {
-        if (Test-Path -LiteralPath $script:TokenFile) {
-            $savedToken = (Get-Content -LiteralPath $script:TokenFile -Raw).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($savedToken)) {
-                $script:BearerToken = $savedToken
-                $script:GeneratedBearerToken = $false
-                return
-            }
+    foreach ($line in Get-Content -LiteralPath $EnvFile) {
+        if ($line -match "^\s*#" -or $line -notmatch "=") {
+            continue
         }
-
-        $script:BearerToken = New-BearerToken
-        $script:GeneratedBearerToken = $true
-        Save-BearerToken
+        $parts = $line -split "=", 2
+        $values[$parts[0].Trim()] = $parts[1]
     }
+    return $values
 }
 
-function Get-CurrentDatabaseUrl {
-    if (-not [string]::IsNullOrWhiteSpace($script:DatabaseUrl)) {
-        return $script:DatabaseUrl
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:CRM_DATABASE_URL)) {
-        return $env:CRM_DATABASE_URL
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
-        return $env:DATABASE_URL
-    }
-    return ""
-}
+function Sync-DevEnv {
+    Initialize-EnvFile
+    $values = Read-EnvValues
 
-function Read-ValueOrDefault {
-    param(
-        [string]$Prompt,
-        [string]$CurrentValue,
-        [string]$DefaultValue = ""
-    )
-
-    $suffix = ""
-    if (-not [string]::IsNullOrWhiteSpace($CurrentValue)) {
-        $suffix = " [$CurrentValue]"
-    }
-    elseif (-not [string]::IsNullOrWhiteSpace($DefaultValue)) {
-        $suffix = " [$DefaultValue]"
+    if (-not $PSBoundParameters.ContainsKey("HostPort") -and $values.ContainsKey("HTTP_PORT") -and $values["HTTP_PORT"] -match "^\d+$") {
+        $script:HostPort = [int]$values["HTTP_PORT"]
     }
 
-    $value = Read-Host "$Prompt$suffix"
-    if (-not [string]::IsNullOrWhiteSpace($value)) {
-        return $value.Trim()
-    }
-    if (-not [string]::IsNullOrWhiteSpace($CurrentValue)) {
-        return $CurrentValue
-    }
-    return $DefaultValue
-}
-
-function Read-RequiredValue {
-    param(
-        [string]$Prompt,
-        [string]$CurrentValue,
-        [string]$Example = ""
-    )
-
-    do {
-        if (-not [string]::IsNullOrWhiteSpace($Example)) {
-            Write-Host "Exemplo: $Example" -ForegroundColor DarkGray
+    if (-not $DatabaseUrlWasProvided) {
+        if ($values.ContainsKey("DATABASE_URL") -and -not [string]::IsNullOrWhiteSpace($values["DATABASE_URL"])) {
+            $script:DatabaseUrl = $values["DATABASE_URL"]
         }
-        $value = Read-ValueOrDefault -Prompt $Prompt -CurrentValue $CurrentValue
-        if (-not [string]::IsNullOrWhiteSpace($value)) {
-            return $value
-        }
-        Write-Host "Valor obrigatorio." -ForegroundColor Yellow
-    } while ($true)
-}
-
-function Prompt-StackVariables {
-    Write-Title "Variaveis da stack"
-    Write-Host "Pressione Enter para manter o valor atual mostrado entre colchetes." -ForegroundColor Yellow
-    Write-Host ""
-
-    $script:DatabaseUrl = Read-RequiredValue `
-        -Prompt "CRM_DATABASE_URL / DATABASE_URL" `
-        -CurrentValue (Get-CurrentDatabaseUrl) `
-        -Example "postgres://user:password@host.docker.internal:5432/crm?sslmode=disable"
-
-    do {
-        $portValue = Read-ValueOrDefault -Prompt "Porta HTTP local" -CurrentValue "$script:HostPort" -DefaultValue "8080"
-        $parsedPort = 0
-        if ([int]::TryParse($portValue, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
-            $script:HostPort = $parsedPort
-            break
-        }
-        Write-Host "Informe uma porta valida entre 1 e 65535." -ForegroundColor Yellow
-    } while ($true)
-
-    Initialize-BearerToken
-    $previousBearerToken = $script:BearerToken
-    $script:BearerToken = Read-ValueOrDefault -Prompt "MCP_API_KEY reader" -CurrentValue $script:BearerToken
-    if ($script:BearerToken -ne $previousBearerToken) {
-        $script:GeneratedBearerToken = $false
-        Save-BearerToken
     }
-    $script:WriterBearerToken = Read-ValueOrDefault -Prompt "MCP_WRITER_API_KEY writer" -CurrentValue $script:WriterBearerToken -DefaultValue $script:BearerToken
-    $script:AllowedOrigins = Read-ValueOrDefault -Prompt "MCP_ALLOWED_ORIGINS opcional" -CurrentValue $script:AllowedOrigins
-    $script:ConfigPath = Read-ValueOrDefault -Prompt "POSTGRES_MCP_CONFIG" -CurrentValue $script:ConfigPath -DefaultValue "/app/Docker/config.docker.yaml"
 
-    if ($script:ConfigPath -eq "configs/example.yaml") {
-        Write-Host ""
-        Write-Host "Aviso: configs/example.yaml escuta em 127.0.0.1 e nao e recomendado para Docker/Portainer." -ForegroundColor Yellow
-        $script:ConfigPath = Read-ValueOrDefault -Prompt "Use o config Docker" -CurrentValue "/app/Docker/config.docker.yaml"
+    if (-not $McpApiKeyWasProvided) {
+        if ($values.ContainsKey("MCP_API_KEY") -and -not [string]::IsNullOrWhiteSpace($values["MCP_API_KEY"])) {
+            $script:McpApiKey = $values["MCP_API_KEY"]
+        }
+        else {
+            $script:McpApiKey = New-DevSecret 32
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+        if ($values.ContainsKey("POSTGRES_MCP_CONFIG") -and -not [string]::IsNullOrWhiteSpace($values["POSTGRES_MCP_CONFIG"])) {
+            $script:ConfigPath = $values["POSTGRES_MCP_CONFIG"]
+        }
+        else {
+            $script:ConfigPath = "/app/Docker/config.docker.yaml"
+        }
     }
 }
 
-function Write-BearerTokenInfo {
-    if ([string]::IsNullOrWhiteSpace($script:BearerToken)) { return }
+function Save-EnvFile {
+    Sync-Env
 
-    Write-Host ""
-    if ($script:GeneratedBearerToken) {
-        Write-Host "MCP_API_KEY gerado automaticamente:" -ForegroundColor Yellow
+    $lines = @()
+    $lines += "# Postgres MCP Server"
+    $lines += "# Gerado automaticamente pelo script de dev"
+    $lines += ""
+    $lines += "POSTGRES_MCP_CONFIG=$ConfigPath"
+    $lines += "DATABASE_URL=$DatabaseUrl"
+    $lines += "MCP_API_KEY=$McpApiKey"
+    $lines += "MCP_WRITER_API_KEY=$McpApiKey"
+    $lines += "MCP_DDL_API_KEY=$McpApiKey"
+    $lines += "POSTGRES_MCP_API_KEY=$McpApiKey"
+    $lines += "HTTP_PORT=$HostPort"
+    $lines += "MCP_PORT=$HostPort"
+    $lines += "POSTGRES_MCP_PORT=$HostPort"
+    $lines += "IMAGE_NAME=$ImageName"
+    $lines += "HTTP_BEARER_TOKEN=$McpApiKey"
+    $lines += "MCP_BEARER_TOKEN=$McpApiKey"
+    $lines += "MCP_ALLOWED_ORIGINS="
+    $lines += ""
+
+    Set-Content -LiteralPath $EnvFile -Value ($lines -join "`n") -NoNewline
+    Write-Host ".env atualizado" -ForegroundColor Green
+}
+
+function Sync-Env {
+    Sync-DevEnv
+
+    if ([string]::IsNullOrWhiteSpace($DatabaseUrl)) {
+        $script:DatabaseUrl = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
     }
-    else {
-        Write-Host "MCP_API_KEY configurado:" -ForegroundColor Yellow
+}
+
+function Enable-WindowsFirewallPorts {
+    Write-Title "Liberar portas no Firewall do Windows"
+    Sync-DevEnv
+
+    if (-not (Test-IsWindowsHost)) {
+        Write-Host "Esta etapa e especifica do Windows." -ForegroundColor Yellow
+        return
     }
-    Write-Host $script:BearerToken -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Use este valor na OpenAI como authorization/bearer token." -ForegroundColor Yellow
+
+    if (-not (Test-IsAdministrator)) {
+        Write-Host "Execute este script como Administrador para criar regras no Firewall do Windows." -ForegroundColor Yellow
+        Write-Host "Porta que precisa entrada TCP: $HostPort" -ForegroundColor Yellow
+        return
+    }
+
+    $ruleName = "MCP Postgres Docker TCP $HostPort"
+    $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    if ($existingRule) {
+        Set-NetFirewallRule -DisplayName $ruleName -Enabled True -Profile Any -Direction Inbound -Action Allow | Out-Null
+        Write-Host "Regra ja existente habilitada: TCP $HostPort" -ForegroundColor Green
+        return
+    }
+
+    New-NetFirewallRule `
+        -DisplayName $ruleName `
+        -Direction Inbound `
+        -Action Allow `
+        -Protocol TCP `
+        -LocalPort $HostPort `
+        -Profile Any | Out-Null
+    Write-Host "Regra criada: TCP $HostPort" -ForegroundColor Green
+}
+
+function Set-ComposeEnvironment {
+    Sync-Env
+
+    $env:COMPOSE_PROJECT_NAME = $ProjectName
+    $env:IMAGE_NAME = $ImageName
+    $env:HTTP_PORT = "$HostPort"
+    $env:MCP_PORT = "$HostPort"
+    $env:POSTGRES_MCP_PORT = "$HostPort"
+    $env:POSTGRES_MCP_CONFIG = $ConfigPath
+    $env:DATABASE_URL = $DatabaseUrl
+    $env:MCP_API_KEY = $McpApiKey
+    $env:MCP_WRITER_API_KEY = $McpApiKey
+    $env:MCP_DDL_API_KEY = $McpApiKey
+    $env:POSTGRES_MCP_API_KEY = $McpApiKey
+    $env:HTTP_BEARER_TOKEN = $McpApiKey
+    $env:MCP_BEARER_TOKEN = $McpApiKey
+    $env:MCP_ALLOWED_ORIGINS = ""
 }
 
 function Invoke-Compose {
     param([string[]]$ArgsList)
+
     $script:LastComposeSucceeded = $false
     if (-not (Test-Docker)) { return }
-    if (-not (Test-ComposeFile)) { return }
+
+    Initialize-EnvFile
+    Set-ComposeEnvironment
+
     Push-Location $ProjectRoot
     try {
-        $resolvedDatabaseUrl = Get-DatabaseUrl
-        $env:HTTP_PORT = "$HostPort"
-        $env:MCP_PORT = "$HostPort"
-        $env:POSTGRES_MCP_PORT = "$HostPort"
-        $env:IMAGE_NAME = $ImageName
-        $env:HTTP_BEARER_TOKEN = $BearerToken
-        $env:MCP_BEARER_TOKEN = $BearerToken
-        $env:MCP_API_KEY = $BearerToken
-        if ([string]::IsNullOrWhiteSpace($WriterBearerToken)) {
-            $env:MCP_WRITER_API_KEY = $BearerToken
-        }
-        else {
-            $env:MCP_WRITER_API_KEY = $WriterBearerToken
-        }
-        $env:POSTGRES_MCP_API_KEY = $BearerToken
-        $env:MCP_ALLOWED_ORIGINS = $AllowedOrigins
-        $env:POSTGRES_MCP_CONFIG = $ConfigPath
-        $env:DATABASE_URL = $resolvedDatabaseUrl
-        $env:CRM_DATABASE_URL = $resolvedDatabaseUrl
         & docker compose -f $ComposeFile @ArgsList
         if ($LASTEXITCODE -ne 0) {
             throw "docker compose falhou com codigo de saida $LASTEXITCODE"
@@ -249,24 +258,11 @@ function Invoke-Compose {
     }
 }
 
-function Get-DatabaseUrl {
-    if (-not [string]::IsNullOrWhiteSpace($script:DatabaseUrl)) {
-        return $script:DatabaseUrl
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:CRM_DATABASE_URL)) {
-        return $env:CRM_DATABASE_URL
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
-        return $env:DATABASE_URL
-    }
-    throw "Informe -DatabaseUrl ou configure CRM_DATABASE_URL/DATABASE_URL com a DSN do Postgres existente."
-}
-
 function Invoke-ImageBuild {
     Write-Title "Build da imagem Docker"
     if (-not (Test-Docker)) { return }
-    if (-not (Test-Path -LiteralPath $script:Dockerfile)) {
-        throw "Dockerfile nao encontrado: $script:Dockerfile"
+    if (-not (Test-Path -LiteralPath $Dockerfile)) {
+        throw "Dockerfile nao encontrado: $Dockerfile"
     }
 
     Push-Location $ProjectRoot
@@ -283,20 +279,20 @@ function Invoke-ImageBuild {
 
 function Invoke-StackBuild {
     Write-Title "Build da stack"
-    Prompt-StackVariables
     Invoke-Compose @("build")
 }
 
 function Start-Stack {
-    param([switch]$SkipPrompt)
-
     Write-Title "Subir stack"
-    if (-not $SkipPrompt) {
-        Prompt-StackVariables
-    }
+    Enable-WindowsFirewallPorts
     Invoke-Compose @("up", "-d", "--build")
     if ($script:LastComposeSucceeded) {
-        Write-BearerTokenInfo
+        if (Test-PostgresHealth) {
+            Write-StackInfo
+        }
+        else {
+            Write-Host "Stack iniciada mas Postgres nao esta pronto. Verifique os logs." -ForegroundColor Yellow
+        }
     }
 }
 
@@ -305,24 +301,34 @@ function Stop-Stack {
     Invoke-Compose @("down")
 }
 
-function Stop-StackWithVolumes {
-    Write-Title "Parar stack e remover volumes"
-    Invoke-Compose @("down", "--volumes")
-}
-
 function Restart-Stack {
-    Prompt-StackVariables
     Stop-Stack
-    Start-Stack -SkipPrompt
+    Start-Stack
 }
 
-function RecreateStack {
+function Recreate-Stack {
     Write-Title "Recriar stack"
-    Prompt-StackVariables
+    Enable-WindowsFirewallPorts
     Invoke-Compose @("up", "-d", "--build", "--force-recreate")
     if ($script:LastComposeSucceeded) {
-        Write-BearerTokenInfo
+        if (Test-PostgresHealth) {
+            Write-StackInfo
+        }
+        else {
+            Write-Host "Stack iniciada mas Postgres nao esta pronto. Verifique os logs." -ForegroundColor Yellow
+        }
     }
+}
+
+function Remove-StackVolumes {
+    Write-Title "Remover stack e volumes"
+    Write-Host "Atencao: isso pode remover volumes de dados." -ForegroundColor Yellow
+    $confirm = Read-Host "Digite REMOVER para confirmar"
+    if ($confirm -ne "REMOVER") {
+        Write-Host "Operacao cancelada." -ForegroundColor Yellow
+        return
+    }
+    Invoke-Compose @("down", "-v")
 }
 
 function Show-Logs {
@@ -340,8 +346,64 @@ function Show-ComposeConfig {
     Invoke-Compose @("config")
 }
 
+function Test-PostgresHealth {
+    Sync-Env
+    $containerName = "${ProjectName}-postgres-1"
+    
+    Write-Host "Verificando Postgres..." -ForegroundColor Yellow
+    
+    $maxAttempts = 30
+    $attempt = 0
+    
+    while ($attempt -lt $maxAttempts) {
+        $status = docker inspect --format='{{.State.Health.Status}}' $containerName 2>$null
+        if ($status -eq "healthy") {
+            Write-Host "Postgres esta healthy!" -ForegroundColor Green
+            return $true
+        }
+        
+        $attempt++
+        Write-Host "Aguardando Postgres... ($attempt/$maxAttempts)" -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
+    }
+    
+    Write-Host "Postgres nao ficou healthy apos $($maxAttempts * 2) segundos" -ForegroundColor Red
+    Write-Host "Verifique os logs com a opcao 8" -ForegroundColor Yellow
+    return $false
+}
+
+function Test-StackHealth {
+    Write-Title "Verificar saude da stack"
+    
+    if (-not (Test-Docker)) { return }
+    
+    Write-Host "Verificando containers..." -ForegroundColor Yellow
+    
+    $postgresStatus = docker inspect --format='{{.State.Status}}' "${ProjectName}-postgres-1" 2>$null
+    $mcpStatus = docker inspect --format='{{.State.Status}}' "${ProjectName}-postgres-mcp-1" 2>$null
+    
+    Write-Host ""
+    Write-Host "Postgres:     $(if ($postgresStatus -eq 'running') { 'running' } else { $postgresStatus })" -ForegroundColor $(if ($postgresStatus -eq 'running') { 'Green' } else { 'Red' })
+    Write-Host "MCP Server:   $(if ($mcpStatus -eq 'running') { 'running' } else { $mcpStatus })" -ForegroundColor $(if ($mcpStatus -eq 'running') { 'Green' } else { 'Red' })
+    
+    if ($postgresStatus -eq "running") {
+        $pgHealth = docker inspect --format='{{.State.Health.Status}}' "${ProjectName}-postgres-1" 2>$null
+        Write-Host "Postgres HP:  $pgHealth" -ForegroundColor $(if ($pgHealth -eq 'healthy') { 'Green' } else { 'Yellow' })
+    }
+    
+    Write-Host ""
+    
+    if ($postgresStatus -ne "running") {
+        Write-Host "Postgres nao esta rodando. Inicie a stack com a opcao 3 ou 6." -ForegroundColor Yellow
+    }
+    elseif ($mcpStatus -ne "running") {
+        Write-Host "MCP Server nao esta rodando. Verifique os logs com a opcao 8." -ForegroundColor Yellow
+    }
+}
+
 function Test-Health {
-    Write-Title "Health check"
+    Write-Title "Health check MCP"
+    Sync-Env
     $url = "http://localhost:$HostPort/healthz"
     try {
         Invoke-RestMethod -Uri $url -Method Get
@@ -354,10 +416,13 @@ function Test-Health {
 
 function Test-MCP {
     Write-Title "Teste POST /mcp tools/list"
-    Initialize-BearerToken
+    Sync-Env
     $url = "http://localhost:$HostPort/mcp"
-    $headers = Get-AuthHeaders
-    $headers["MCP-Protocol-Version"] = "2025-06-18"
+    $headers = @{
+        "Authorization" = "Bearer $McpApiKey"
+        "Accept" = "application/json, text/event-stream"
+        "MCP-Protocol-Version" = "2025-06-18"
+    }
 
     $body = @{
         jsonrpc = "2.0"
@@ -377,10 +442,13 @@ function Test-MCP {
 
 function Test-MCPValidateSql {
     Write-Title "Teste validate_sql"
-    Initialize-BearerToken
+    Sync-Env
     $url = "http://localhost:$HostPort/mcp"
-    $headers = Get-AuthHeaders
-    $headers["MCP-Protocol-Version"] = "2025-06-18"
+    $headers = @{
+        "Authorization" = "Bearer $McpApiKey"
+        "Accept" = "application/json, text/event-stream"
+        "MCP-Protocol-Version" = "2025-06-18"
+    }
 
     $body = @{
         jsonrpc = "2.0"
@@ -404,15 +472,53 @@ function Test-MCPValidateSql {
     }
 }
 
-function Get-AuthHeaders {
-    Initialize-BearerToken
-    return @{
-        "Authorization" = "Bearer $script:BearerToken"
+function Test-MCPExecuteDdl {
+    Write-Title "Teste execute_ddl (CREATE TABLE)"
+    Sync-Env
+    $url = "http://localhost:$HostPort/mcp"
+    $headers = @{
+        "Authorization" = "Bearer $McpApiKey"
         "Accept" = "application/json, text/event-stream"
+        "MCP-Protocol-Version" = "2025-06-18"
+    }
+
+    $body = @{
+        jsonrpc = "2.0"
+        id = 3
+        method = "tools/call"
+        params = @{
+            name = "execute_ddl"
+            arguments = @{
+                sql = "CREATE TABLE IF NOT EXISTS public.mcp_test (id serial PRIMARY KEY, name text, created_at timestamp DEFAULT now())"
+            }
+        }
+    } | ConvertTo-Json -Depth 8
+
+    try {
+        $result = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -ContentType "application/json" -Body $body
+        Write-Host "Resultado:" -ForegroundColor Green
+        $result | ConvertTo-Json -Depth 5
+    }
+    catch {
+        Write-Host "Falha ao chamar $url" -ForegroundColor Red
+        Write-Host $_.Exception.Message
     }
 }
 
+function Write-StackInfo {
+    Sync-Env
+    Write-Host ""
+    Write-Host "Stack iniciada." -ForegroundColor Green
+    Write-Host "Postgres:     postgres://localhost:5432/${POSTGRES_DB:-mcp}" -ForegroundColor Green
+    Write-Host "MCP Endpoint: http://localhost:$HostPort/mcp" -ForegroundColor Green
+    Write-Host "Health:       http://localhost:$HostPort/healthz" -ForegroundColor Green
+    Write-Host "API Key:      $McpApiKey" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Use este token como Authorization: Bearer <token>" -ForegroundColor Yellow
+}
+
 function Show-Menu {
+    Sync-Env
     Clear-Host
     Write-FelsenBanner
     Write-Host ""
@@ -420,13 +526,12 @@ function Show-Menu {
     Write-Host ""
     Write-Host "Projeto:       $ProjectRoot"
     Write-Host "Compose:       $ComposeFile"
-    Write-Host "Config:        $ConfigPath"
     Write-Host "Dockerfile:    $Dockerfile"
+    Write-Host "Env:           $EnvFile"
     Write-Host "Imagem:        $ImageName`:$ImageTag"
-    Write-Host "Porta local:   $HostPort"
-    Write-Host "Database URL:  $(if ($DatabaseUrl -or $env:CRM_DATABASE_URL -or $env:DATABASE_URL) { 'configurado' } else { 'obrigatorio para subir a stack' })"
-    Write-Host "Bearer token:  $(if ($BearerToken) { 'configurado' } else { 'sera gerado ao subir a stack' })"
-    Write-Host "Token salvo:   $TokenFile"
+    Write-Host "Porta MCP:     $HostPort"
+    Write-Host "Porta PG:      5432"
+    Write-Host "API Key:       $(if ($McpApiKey) { 'configurado' } else { 'sera gerada' })"
     Write-Host ""
     Write-Host "1. Buildar imagem Docker"
     Write-Host "2. Buildar stack"
@@ -436,11 +541,15 @@ function Show-Menu {
     Write-Host "6. Recriar stack"
     Write-Host "7. Ver status"
     Write-Host "8. Ver logs"
-    Write-Host "9. Health check"
-    Write-Host "10. Testar /mcp tools/list"
-    Write-Host "11. Testar validate_sql"
-    Write-Host "12. Ver config compose"
-    Write-Host "13. Parar stack e remover volumes"
+    Write-Host "9. Health check MCP"
+    Write-Host "10. Verificar saude da stack"
+    Write-Host "11. Testar /mcp tools/list"
+    Write-Host "12. Testar validate_sql"
+    Write-Host "13. Testar execute_ddl"
+    Write-Host "14. Ver config compose"
+    Write-Host "15. Liberar portas no Firewall"
+    Write-Host "16. Remover stack e volumes"
+    Write-Host "17. Salvar .env"
     Write-Host "0. Sair"
     Write-Host ""
 }
@@ -456,14 +565,18 @@ do {
             "3" { Start-Stack }
             "4" { Stop-Stack }
             "5" { Restart-Stack }
-            "6" { RecreateStack }
+            "6" { Recreate-Stack }
             "7" { Show-Status }
             "8" { Show-Logs }
             "9" { Test-Health }
-            "10" { Test-MCP }
-            "11" { Test-MCPValidateSql }
-            "12" { Show-ComposeConfig }
-            "13" { Stop-StackWithVolumes }
+            "10" { Test-StackHealth }
+            "11" { Test-MCP }
+            "12" { Test-MCPValidateSql }
+            "13" { Test-MCPExecuteDdl }
+            "14" { Show-ComposeConfig }
+            "15" { Enable-WindowsFirewallPorts }
+            "16" { Remove-StackVolumes }
+            "17" { Save-EnvFile }
             "0" { break }
             default { Write-Host "Opcao invalida." -ForegroundColor Yellow }
         }

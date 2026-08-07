@@ -279,6 +279,35 @@ func (s *Store) ExplainSQL(ctx context.Context, connection, sql string) (QueryRe
 	return result, validation, err
 }
 
+func (s *Store) ExecuteDDL(ctx context.Context, connection, sql string) (DDLResult, sqlguard.ValidationResult, error) {
+	db, err := s.db(connection)
+	if err != nil {
+		return DDLResult{}, sqlguard.ValidationResult{}, err
+	}
+	validation := sqlguard.Validate(sql, db.cfg, sqlguard.ModeDDL)
+	if !validation.Valid {
+		return DDLResult{}, validation, errors.New(validation.Reason)
+	}
+	ctx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
+	defer cancel()
+	_, err = db.pool.Exec(ctx, sql)
+	if err != nil {
+		return DDLResult{}, validation, err
+	}
+	op := validation.Operation
+	tables := validation.TablesDetected
+	msg := fmt.Sprintf("DDL %s executed successfully", op)
+	if len(tables) > 0 {
+		msg += " on " + strings.Join(tables, ", ")
+	}
+	db.mu.Lock()
+	for _, t := range tables {
+		delete(db.cache, t)
+	}
+	db.mu.Unlock()
+	return DDLResult{Message: msg}, validation, nil
+}
+
 func (s *Store) RefreshSchemaCache(connection string) error {
 	db, err := s.db(connection)
 	if err != nil {

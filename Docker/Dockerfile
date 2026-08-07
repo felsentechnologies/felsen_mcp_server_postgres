@@ -23,6 +23,7 @@ COPY Docker/config.docker.yaml /app/Docker/config.docker.yaml
 ENV POSTGRES_MCP_CONFIG=/app/Docker/config.docker.yaml
 ENV MCP_API_KEY=change-me-reader
 ENV MCP_WRITER_API_KEY=change-me-writer
+ENV MCP_DDL_API_KEY=change-me-ddl
 
 EXPOSE 8080
 

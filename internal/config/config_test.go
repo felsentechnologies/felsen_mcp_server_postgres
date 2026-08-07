@@ -52,7 +52,7 @@ connections:
 
 func TestLoadUsesExampleConfigByDefault(t *testing.T) {
 	t.Setenv("POSTGRES_MCP_CONFIG", "")
-	t.Setenv("CRM_DATABASE_URL", "postgres://user:pass@localhost:5432/crm")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/postgres")
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -72,7 +72,7 @@ func TestLoadUsesExampleConfigByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := cfg.Connections["crm"]; !ok {
-		t.Fatalf("expected default config to load crm connection: %#v", cfg.Connections)
+	if _, ok := cfg.Connections["default"]; !ok {
+		t.Fatalf("expected default config to load default connection: %#v", cfg.Connections)
 	}
 }

@@ -59,3 +59,7 @@ type QueryResult struct {
 type DMLResult struct {
 	RowsAffected int64 `json:"rows_affected"`
 }
+
+type DDLResult struct {
+	Message string `json:"message"`
+}

@@ -9,22 +9,15 @@ services:
       - postgres-data:/var/lib/postgresql/data
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-mcp}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 10s
-    restart: unless-stopped
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    networks:
+      - mcp-network
 
   postgres-mcp:
     image: ${IMAGE_NAME:-mcp-postgres}:latest
-    build:
-      context: ..
-      dockerfile: Docker/Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       POSTGRES_MCP_CONFIG: ${POSTGRES_MCP_CONFIG:-/app/Docker/config.docker.yaml}
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-mcp}?sslmode=disable
@@ -35,7 +28,27 @@ services:
       MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
     ports:
       - "${HTTP_PORT:-${POSTGRES_MCP_PORT:-8080}}:8080"
-    restart: unless-stopped
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    networks:
+      - mcp-network
 
 volumes:
   postgres-data:
+
+networks:
+  mcp-network:
+    driver: overlay

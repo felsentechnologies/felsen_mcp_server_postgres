@@ -85,6 +85,7 @@ func (a *App) registerTools() {
 	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_sql", Description: "Execute a validated SELECT query with configured row limits and masking.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, OpenWorldHint: &openWorld}}, a.executeSQL)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_dml", Description: "Execute INSERT, UPDATE or DELETE only when explicitly allowlisted.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDML)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_ddl", Description: "Execute DDL statements (CREATE, ALTER, DROP, TRUNCATE) when DDL is enabled for the connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDDL)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "refresh_schema_cache", Description: "Clear cached schema descriptions for a connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.refreshSchemaCache)
 }
 
@@ -215,6 +216,9 @@ func (a *App) validateSQL(ctx context.Context, req *mcp.CallToolRequest, in vali
 	if mode == sqlguard.ModeDML && !p.HasScope("write") {
 		return nil, sqlguard.ValidationResult{Valid: false, Reason: "write scope is required"}, nil
 	}
+	if mode == sqlguard.ModeDDL && !p.HasScope("ddl") {
+		return nil, sqlguard.ValidationResult{Valid: false, Reason: "ddl scope is required"}, nil
+	}
 	result := sqlguard.Validate(in.SQL, cfg, mode)
 	return nil, result, nil
 }
@@ -249,6 +253,17 @@ func (a *App) explainSQL(ctx context.Context, req *mcp.CallToolRequest, in sqlIn
 	}
 	result, validation, err := a.store.ExplainSQL(ctx, connection, in.SQL)
 	a.audit(p, connection, "explain_sql", fingerprint(in.SQL), validation.TablesDetected, err == nil, int64(result.RowCount), start, err)
+	return nil, result, err
+}
+
+func (a *App) executeDDL(ctx context.Context, req *mcp.CallToolRequest, in sqlInput) (*mcp.CallToolResult, postgres.DDLResult, error) {
+	start := time.Now()
+	p, connection, err := a.authorize(req, in.ConnectionName, "ddl")
+	if err != nil {
+		return nil, postgres.DDLResult{}, err
+	}
+	result, validation, err := a.store.ExecuteDDL(ctx, connection, in.SQL)
+	a.audit(p, connection, "execute_ddl", fingerprint(in.SQL), validation.TablesDetected, err == nil, 0, start, err)
 	return nil, result, err
 }
 

@@ -59,6 +59,7 @@ type ConnectionConfig struct {
 	QueryTimeout string        `json:"query_timeout" yaml:"query_timeout"`
 	Masking      MaskingConfig `json:"masking" yaml:"masking"`
 	DMLPolicies  []DMLPolicy   `json:"dml_policies" yaml:"dml_policies"`
+	DDLEnabled   bool          `json:"ddl_enabled" yaml:"ddl_enabled"`
 }
 
 type MaskingConfig struct {
@@ -225,6 +226,10 @@ func (c ConnectionConfig) SchemaAllowed(schema string) bool {
 		}
 	}
 	return false
+}
+
+func (c ConnectionConfig) DDLAllowed() bool {
+	return c.DDLEnabled
 }
 
 func (c ConnectionConfig) DMLAllowed(schema, table, operation string) bool {

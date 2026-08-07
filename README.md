@@ -1,14 +1,15 @@
 # Postgres MCP Server
 
-Generic Postgres MCP server written in Go. It exposes schema discovery, table descriptions, masked row samples, SQL validation, read-only SELECT execution, EXPLAIN and deny-by-default DML execution over MCP Streamable HTTP.
+Generic Postgres MCP server written in Go. It exposes schema discovery, table descriptions, masked row samples, SQL validation, read-only SELECT execution, EXPLAIN, DML execution and DDL execution over MCP Streamable HTTP.
 
 ## Quick Start
 
 ```powershell
 go mod tidy
-$env:CRM_DATABASE_URL="postgres://user:password@localhost:5432/crm?sslmode=disable"
+$env:DATABASE_URL="postgres://user:password@localhost:5432/postgres?sslmode=disable"
 $env:MCP_API_KEY="change-me-reader"
 $env:MCP_WRITER_API_KEY="change-me-writer"
+$env:MCP_DDL_API_KEY="change-me-ddl"
 go run ./cmd/postgres-mcp
 ```
 
@@ -44,6 +45,7 @@ go run ./cmd/postgres-mcp
 - `validate_sql`
 - `execute_sql`
 - `execute_dml`
+- `execute_ddl`
 - `explain_sql`
 - `refresh_schema_cache`
 
@@ -58,12 +60,12 @@ go run ./cmd/postgres-mcp
 ## Safety Defaults
 
 - Bearer token required for `/mcp`.
-- Token scopes are `read`, `write` and `admin`.
+- Token scopes are `read`, `write`, `ddl` and `admin`.
 - Connections are named and access is restricted per token.
 - Schemas are allowlisted per connection.
 - `execute_sql` only runs `SELECT` and wraps missing `LIMIT` with the configured `max_rows`.
 - `execute_dml` only runs `INSERT`, `UPDATE` or `DELETE` when a matching DML policy exists.
-- DDL and migrations are blocked in this version.
+- `execute_ddl` runs `CREATE`, `ALTER`, `DROP` and `TRUNCATE` when `ddl_enabled` is true and token has `ddl` scope.
 - Sample/query results are masked using default sensitive column patterns.
 
 ## Notes

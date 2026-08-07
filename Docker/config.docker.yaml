@@ -2,37 +2,32 @@ server:
   host: 0.0.0.0
   port: 8080
   endpoint: /mcp
-  query_timeout: 10s
+  query_timeout: 30s
   session_timeout: 30m
-  max_rows: 100
+  max_rows: 500
   json_response: false
   stateless: false
 
 auth:
   api_keys:
-    - name: docker-reader
+    - name: admin
       token_env: MCP_API_KEY
-      scopes: [read]
-      connections: [crm]
-    - name: docker-writer
-      token_env: MCP_WRITER_API_KEY
-      scopes: [read, write]
-      connections: [crm]
+      scopes: [admin]
+      connections: [default]
 
 connections:
-  crm:
-    dsn_env: CRM_DATABASE_URL
-    schemas: [public]
-    max_rows: 100
-    query_timeout: 10s
+  default:
+    dsn_env: DATABASE_URL
+    schemas: ["*"]
+    max_rows: 500
+    query_timeout: 30s
+    ddl_enabled: true
     masking:
-      sensitive_columns:
-        - (?i)customer_document
-      allow_columns: []
+      enabled: false
     dml_policies:
-      - schema: public
-        table: customers
-        operations: [insert, update]
+      - schema: "*"
+        table: "*"
+        operations: [insert, update, delete]
 
 audit:
   destination: stdout

@@ -13,6 +13,7 @@ const (
 	ModeRead    Mode = "read"
 	ModeDML     Mode = "dml"
 	ModeExplain Mode = "explain"
+	ModeDDL     Mode = "ddl"
 )
 
 type ValidationResult struct {
@@ -25,6 +26,15 @@ type ValidationResult struct {
 }
 
 var tablePattern = regexp.MustCompile(`(?is)\b(?:from|join|into|update|delete\s+from)\s+((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)`)
+
+var ddlTablePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?is)\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)`),
+	regexp.MustCompile(`(?is)\balter\s+table\s+(?:if\s+exists\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)`),
+	regexp.MustCompile(`(?is)\bdrop\s+table\s+(?:if\s+exists\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)`),
+	regexp.MustCompile(`(?is)\btruncate\s+(?:table\s+)?(?:if\s+exists\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)`),
+	regexp.MustCompile(`(?is)\bcreate\s+(?:unique\s+)?index\s+(?:if\s+not\s+exists\s+)?(?:\w+\s+)?on\s+((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)`),
+	regexp.MustCompile(`(?is)\bdrop\s+index\s+(?:if\s+exists\s+)?(?:(?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w*]*))?\s*,\s*)*((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)`),
+}
 
 func Validate(sql string, cfg config.ConnectionConfig, mode Mode) ValidationResult {
 	sql = strings.TrimSpace(sql)
@@ -41,6 +51,24 @@ func Validate(sql string, cfg config.ConnectionConfig, mode Mode) ValidationResu
 
 	op := operation(sql)
 	readOnly := op == "select"
+
+	if mode == ModeDDL {
+		if !isDDLOperation(op) {
+			return invalid("ddl mode requires a DDL statement (CREATE, ALTER, DROP, TRUNCATE)")
+		}
+		if !cfg.DDLAllowed() {
+			return invalid("DDL is not enabled for this connection")
+		}
+		tables := DetectDDLTables(sql)
+		for _, table := range tables {
+			schema, _ := SplitTable(table)
+			if !cfg.SchemaAllowed(schema) {
+				return ValidationResult{Valid: false, ReadOnly: false, Operation: op, TablesDetected: tables, Reason: "schema is not allowed: " + schema}
+			}
+		}
+		return ValidationResult{Valid: true, ReadOnly: false, Operation: op, TablesDetected: tables, Warnings: []string{"DDL statement detected; ensure you understand the impact on the database schema"}}
+	}
+
 	switch {
 	case op == "select", op == "insert", op == "update", op == "delete":
 	default:
@@ -93,6 +121,26 @@ func DetectTables(sql string) []string {
 	return tables
 }
 
+func DetectDDLTables(sql string) []string {
+	seen := map[string]bool{}
+	var tables []string
+	for _, pattern := range ddlTablePatterns {
+		matches := pattern.FindAllStringSubmatch(sql, -1)
+		for _, match := range matches {
+			if len(match) < 2 {
+				continue
+			}
+			table := normalizeTable(match[1])
+			if table == "" || seen[table] {
+				continue
+			}
+			seen[table] = true
+			tables = append(tables, table)
+		}
+	}
+	return tables
+}
+
 func SplitTable(table string) (string, string) {
 	parts := strings.Split(table, ".")
 	if len(parts) == 1 {
@@ -122,7 +170,19 @@ func operation(sql string) string {
 	if len(fields) == 0 {
 		return ""
 	}
-	return strings.ToLower(fields[0])
+	op := strings.ToLower(fields[0])
+	if op == "create" || op == "alter" || op == "drop" || op == "truncate" {
+		return op
+	}
+	return op
+}
+
+func isDDLOperation(op string) bool {
+	switch op {
+	case "create", "alter", "drop", "truncate":
+		return true
+	}
+	return false
 }
 
 func normalizeTable(table string) string {
