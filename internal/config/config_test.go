@@ -247,6 +247,7 @@ func TestLoadOAuthConfigurationFromEnvironment(t *testing.T) {
 	t.Setenv("MCP_OAUTH_USERNAME", "chatgpt")
 	t.Setenv("MCP_OAUTH_PASSWORD", "strong-oauth-password-123")
 	t.Setenv("MCP_OAUTH_PRINCIPAL", "reader")
+	t.Setenv("MCP_OAUTH_CALLBACK_URL", "https://chatgpt.com/connector/oauth/test-connector")
 	t.Setenv("MCP_OAUTH_DEFAULT_SCOPES", "read")
 	t.Setenv("MCP_OAUTH_BASE_SCOPES", "read")
 	t.Setenv("TEST_MCP_TOKEN", "test-token")
@@ -288,6 +289,9 @@ oauth:
 	if cfg.OAuth.SigningKey == "" || cfg.OAuth.Username != "chatgpt" || cfg.OAuth.Password == "" {
 		t.Fatalf("OAuth secret environment values were not resolved: %#v", cfg.OAuth)
 	}
+	if len(cfg.OAuth.RedirectURIs) != 1 || cfg.OAuth.RedirectURIs[0] != "https://chatgpt.com/connector/oauth/test-connector" {
+		t.Fatalf("OAuth callback URL was not resolved from the environment: %#v", cfg.OAuth.RedirectURIs)
+	}
 }
 
 func TestValidateRejectsOAuthScopeOutsidePrincipal(t *testing.T) {
@@ -303,7 +307,7 @@ func TestValidateRejectsOAuthScopeOutsidePrincipal(t *testing.T) {
 		OAuth: OAuthConfig{
 			Enabled: true, Issuer: "https://mcp.example.com", Resource: "https://mcp.example.com",
 			SigningKey: "oauth-signing-key-with-at-least-32-characters", Username: "chatgpt", Password: "strong-password",
-			Principal: "reader", ClientID: "felsen-chatgpt", DefaultScopes: []string{"write"}, BaseScopes: []string{"read"},
+			Principal: "reader", ClientID: "felsen-chatgpt", RedirectURIs: []string{"https://chatgpt.com/connector/oauth/test"}, DefaultScopes: []string{"write"}, BaseScopes: []string{"read"},
 			AccessTokenTTL: "1h", RefreshTokenTTL: "24h", AuthorizationCodeTTL: "5m",
 		},
 		Connections: map[string]ConnectionConfig{"default": {

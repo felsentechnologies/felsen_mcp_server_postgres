@@ -14,6 +14,7 @@ param(
     [string]$OAuthPassword = "",
     [string]$OAuthPrincipal = "",
     [string]$OAuthClientId = "",
+    [string]$OAuthCallbackUrl = "",
     [string]$OAuthClientStorePath = "",
     [int]$PostgresPort = 5432,
     [string]$PostgresDb = "",
@@ -56,6 +57,7 @@ $OAuthUsernameWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthUsername)
 $OAuthPasswordWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthPassword)
 $OAuthPrincipalWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthPrincipal)
 $OAuthClientIdWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthClientId)
+$OAuthCallbackUrlWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthCallbackUrl)
 $OAuthClientStorePathWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthClientStorePath)
 
 function Write-Title {
@@ -272,6 +274,9 @@ function Sync-DevEnv {
     if (-not $OAuthClientIdWasProvided -and $values.ContainsKey("MCP_OAUTH_CLIENT_ID")) {
         $script:OAuthClientId = $values["MCP_OAUTH_CLIENT_ID"]
     }
+    if (-not $OAuthCallbackUrlWasProvided -and $values.ContainsKey("MCP_OAUTH_CALLBACK_URL")) {
+        $script:OAuthCallbackUrl = $values["MCP_OAUTH_CALLBACK_URL"]
+    }
     if (-not $OAuthClientStorePathWasProvided -and $values.ContainsKey("MCP_OAUTH_CLIENT_STORE_PATH")) {
         $script:OAuthClientStorePath = $values["MCP_OAUTH_CLIENT_STORE_PATH"]
     }
@@ -333,6 +338,7 @@ function Save-EnvFile {
     $lines += "MCP_OAUTH_PASSWORD=$OAuthPassword"
     $lines += "MCP_OAUTH_PRINCIPAL=$OAuthPrincipal"
     $lines += "MCP_OAUTH_CLIENT_ID=$OAuthClientId"
+    $lines += "MCP_OAUTH_CALLBACK_URL=$OAuthCallbackUrl"
     $lines += "MCP_OAUTH_CLIENT_STORE_PATH=$OAuthClientStorePath"
     $lines += "MCP_VERSION=$(Get-ProjectVersion)"
     $lines += "HTTP_PORT=$HostPort"
@@ -384,7 +390,8 @@ function Sync-Env {
             @{ Name = "MCP_OAUTH_USERNAME"; Value = $OAuthUsername },
             @{ Name = "MCP_OAUTH_PASSWORD"; Value = $OAuthPassword },
             @{ Name = "MCP_OAUTH_PRINCIPAL"; Value = $OAuthPrincipal },
-            @{ Name = "MCP_OAUTH_CLIENT_ID"; Value = $OAuthClientId }
+            @{ Name = "MCP_OAUTH_CLIENT_ID"; Value = $OAuthClientId },
+            @{ Name = "MCP_OAUTH_CALLBACK_URL"; Value = $OAuthCallbackUrl }
         )) {
             if ([string]::IsNullOrWhiteSpace($item.Value)) {
                 throw "$($item.Name) is required when OAuth is enabled."
@@ -404,6 +411,16 @@ function Sync-Env {
         }
         if ($OAuthPassword.Length -lt 12 -or $OAuthPassword -match "(?i)^(secret|password)$") {
             throw "MCP_OAUTH_PASSWORD must have at least 12 characters and cannot be a placeholder."
+        }
+        $callbackUrl = $null
+        if (-not [System.Uri]::TryCreate($OAuthCallbackUrl, [System.UriKind]::Absolute, [ref]$callbackUrl) -or $callbackUrl.Scheme -notin @("http", "https") -or [string]::IsNullOrWhiteSpace($callbackUrl.Host)) {
+            throw "MCP_OAUTH_CALLBACK_URL must be an absolute HTTP(S) URL."
+        }
+        if ($callbackUrl.Scheme -eq "http" -and $callbackUrl.Hostname -notin @("localhost", "127.0.0.1", "::1")) {
+            throw "MCP_OAUTH_CALLBACK_URL may use HTTP only for localhost."
+        }
+        if ($callbackUrl.Query -ne "" -or $callbackUrl.Fragment -ne "") {
+            throw "MCP_OAUTH_CALLBACK_URL cannot contain a query or fragment."
         }
     }
     [void](Get-ProjectVersion)
@@ -468,6 +485,7 @@ function Set-ComposeEnvironment {
     $env:MCP_OAUTH_PASSWORD = $OAuthPassword
     $env:MCP_OAUTH_PRINCIPAL = $OAuthPrincipal
     $env:MCP_OAUTH_CLIENT_ID = $OAuthClientId
+    $env:MCP_OAUTH_CALLBACK_URL = $OAuthCallbackUrl
     $env:MCP_OAUTH_CLIENT_STORE_PATH = $OAuthClientStorePath
     $env:MCP_VERSION = Get-ProjectVersion
     $env:MCP_COMMIT = Get-GitCommit
@@ -847,6 +865,7 @@ function Write-StackInfo {
     if ($OAuthEnabled) {
         Write-Host "OAuth Auth:   $($PublicBaseUrl.TrimEnd('/'))/oauth/authorize" -ForegroundColor Green
         Write-Host "OAuth Token:  $($PublicBaseUrl.TrimEnd('/'))/oauth/token" -ForegroundColor Green
+        Write-Host "OAuth Callback: $OAuthCallbackUrl" -ForegroundColor Green
     }
     Write-Host ""
     Write-Host "Use este token como Authorization: Bearer <token>" -ForegroundColor Yellow

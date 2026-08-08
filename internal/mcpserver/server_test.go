@@ -188,6 +188,7 @@ func TestOAuthAccessTokenCanListMCPTools(t *testing.T) {
 		Password:             "correct-horse-battery-staple",
 		Principal:            "reader",
 		ClientID:             "felsen-chatgpt",
+		RedirectURIs:         []string{"https://chatgpt.com/connector/oauth/test"},
 		DefaultScopes:        []string{"read"},
 		BaseScopes:           []string{"read"},
 		AccessTokenTTL:       time.Hour.String(),

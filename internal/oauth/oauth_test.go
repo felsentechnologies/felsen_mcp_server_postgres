@@ -34,6 +34,7 @@ func testProvider(t *testing.T) *Provider {
 		Password:             "correct-horse-battery-staple",
 		Principal:            "reader",
 		ClientID:             "felsen-chatgpt",
+		RedirectURIs:         []string{"https://chatgpt.com/connector/oauth/test"},
 		DefaultScopes:        []string{"read"},
 		BaseScopes:           []string{"read"},
 		AccessTokenTTL:       time.Hour.String(),
@@ -184,11 +185,11 @@ func TestDCRAuthorizationPKCEAndTokenExchange(t *testing.T) {
 	}
 }
 
-func TestStaticChatGPTClientAcceptsOnlyOfficialCallbackFamily(t *testing.T) {
+func TestStaticChatGPTClientAcceptsOnlyConfiguredCallback(t *testing.T) {
 	provider := testProvider(t)
 	valid := url.Values{
 		"client_id":             {"felsen-chatgpt"},
-		"redirect_uri":          {"https://chatgpt.com/connector/oauth/connector-123"},
+		"redirect_uri":          {"https://chatgpt.com/connector/oauth/test"},
 		"response_type":         {"code"},
 		"scope":                 {"read"},
 		"code_challenge":        {"challenge"},
@@ -198,7 +199,14 @@ func TestStaticChatGPTClientAcceptsOnlyOfficialCallbackFamily(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	provider.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected official ChatGPT callback to be accepted, got %d", recorder.Code)
+		t.Fatalf("expected configured ChatGPT callback to be accepted, got %d", recorder.Code)
+	}
+	valid.Set("redirect_uri", "https://chatgpt.com/connector/oauth/another-connector")
+	request = httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+valid.Encode(), nil)
+	recorder = httptest.NewRecorder()
+	provider.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected unconfigured ChatGPT callback to be rejected, got %d", recorder.Code)
 	}
 	valid.Set("redirect_uri", "https://attacker.example/callback")
 	request = httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+valid.Encode(), nil)
@@ -225,6 +233,7 @@ func TestDCRClientStoreSurvivesProviderRestart(t *testing.T) {
 		Password:             "correct-horse-battery-staple",
 		Principal:            "reader",
 		ClientID:             "felsen-chatgpt",
+		RedirectURIs:         []string{"https://chatgpt.com/connector/oauth/test"},
 		DefaultScopes:        []string{"read"},
 		BaseScopes:           []string{"read"},
 		AccessTokenTTL:       time.Hour.String(),

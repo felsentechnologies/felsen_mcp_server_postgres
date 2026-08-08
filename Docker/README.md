@@ -77,6 +77,7 @@ MCP_OAUTH_USERNAME=connector-login
 MCP_OAUTH_PASSWORD=your-long-random-oauth-password
 MCP_OAUTH_PRINCIPAL=reader
 MCP_OAUTH_CLIENT_ID=felsen-chatgpt
+MCP_OAUTH_CALLBACK_URL=https://chatgpt.com/connector/oauth/<callback-id>
 HTTP_PORT=8080
 IMAGE_NAME=mcp-postgres
 IMAGE_TAG=v0.4.0
@@ -100,7 +101,7 @@ mount `oauth-client-data` at `/app/data`, so Dynamic Client Registration data
 survives container recreation when `MCP_OAUTH_CLIENT_STORE_PATH` uses the
 default `/app/data/oauth-clients.json`.
 
-Do not publish the Postgres port in production. The Swarm file keeps it on the internal overlay network and requires POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, MCP_API_KEY, MCP_CITATION_SIGNING_KEY, and MCP_PUBLIC_BASE_URL. When OAuth is enabled, also provide MCP_OAUTH_SIGNING_KEY, MCP_OAUTH_USERNAME, and MCP_OAUTH_PASSWORD. Citation URLs are HMAC-signed and expire after 15 minutes.
+Do not publish the Postgres port in production. The Swarm file keeps it on the internal overlay network and requires POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, MCP_API_KEY, MCP_CITATION_SIGNING_KEY, and MCP_PUBLIC_BASE_URL. When OAuth is enabled, also provide MCP_OAUTH_SIGNING_KEY, MCP_OAUTH_USERNAME, MCP_OAUTH_PASSWORD, and the exact `MCP_OAUTH_CALLBACK_URL` displayed by ChatGPT. Citation URLs are HMAC-signed and expire after 15 minutes.
 
 ## Stop Stack
 

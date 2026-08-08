@@ -43,6 +43,7 @@ services:
       MCP_OAUTH_PASSWORD: ${MCP_OAUTH_PASSWORD:-}
       MCP_OAUTH_PRINCIPAL: ${MCP_OAUTH_PRINCIPAL:-reader}
       MCP_OAUTH_CLIENT_ID: ${MCP_OAUTH_CLIENT_ID:-felsen-chatgpt}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-}
       MCP_OAUTH_CLIENT_STORE_PATH: ${MCP_OAUTH_CLIENT_STORE_PATH:-/app/data/oauth-clients.json}
     volumes:
       - oauth-client-data:/app/data

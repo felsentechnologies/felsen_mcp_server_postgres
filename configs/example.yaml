@@ -28,6 +28,8 @@ oauth:
   password_env: MCP_OAUTH_PASSWORD
   principal: reader
   client_id: felsen-chatgpt
+  # Exact ChatGPT callback URL(s); MCP_OAUTH_CALLBACK_URL overrides this list.
+  redirect_uris: []
   client_store_path_env: MCP_OAUTH_CLIENT_STORE_PATH
   default_scopes: [read]
   base_scopes: [read]

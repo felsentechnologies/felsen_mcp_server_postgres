@@ -120,6 +120,9 @@ func New(cfg config.OAuthConfig, principals *authn.Manager) (*Provider, error) {
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		return nil, errors.New("OAuth client ID is required")
 	}
+	if len(cfg.RedirectURIs) == 0 {
+		return nil, errors.New("OAuth callback URL is required in configuration")
+	}
 
 	p := &Provider{
 		cfg:        cfg,
@@ -676,14 +679,7 @@ func (p *Provider) redirectAllowedForClient(client registeredClient, redirectURI
 			return true
 		}
 	}
-	if client.ClientID != p.cfg.ClientID || len(client.RedirectURIs) != 0 {
-		return false
-	}
-	// ChatGPT shows a per-connector callback URL in its connector UI. For the
-	// static User-Defined client, accept only that documented callback family;
-	// arbitrary redirect URLs remain rejected.
-	return strings.HasPrefix(redirectURI, "https://chatgpt.com/connector/oauth/") ||
-		strings.HasPrefix(redirectURI, "https://chat.openai.com/connector/oauth/")
+	return false
 }
 
 func (p *Provider) scopesSupported(principal authn.Principal) []string {

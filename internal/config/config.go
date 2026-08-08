@@ -334,6 +334,11 @@ func applyOAuthDefaults(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_CLIENT_STORE_PATH")); value != "" {
 		oauth.ClientStorePath = value
 	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_CALLBACK_URL")); value != "" {
+		// The callback variable is the recommended configuration for the
+		// ChatGPT connector and overrides any YAML redirect URI list.
+		oauth.RedirectURIs = []string{value}
+	}
 	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_DEFAULT_SCOPES")); value != "" {
 		oauth.DefaultScopes = splitConfigList(value)
 	}
@@ -487,6 +492,9 @@ func (cfg *Config) Validate() error {
 		principal, ok := principalNames[cfg.OAuth.Principal]
 		if !ok {
 			return fmt.Errorf("oauth.principal %q does not match an auth api key", cfg.OAuth.Principal)
+		}
+		if len(cfg.OAuth.RedirectURIs) == 0 {
+			return errors.New("oauth.callback_url (MCP_OAUTH_CALLBACK_URL) is required when OAuth is enabled")
 		}
 		for _, redirectURI := range cfg.OAuth.RedirectURIs {
 			if err := validateOAuthRedirectURI(redirectURI); err != nil {
