@@ -12,12 +12,14 @@ Use a dedicated read-only PostgreSQL role for read tokens and separate credentia
 - Use PostgreSQL TLS verification in production; sslmode=disable is for local Docker-only development.
 - Set server.public_base_url to that public origin and inject a unique MCP_CITATION_SIGNING_KEY of at least 32 characters.
 - Store API keys and DSNs in a secret manager or environment injection mechanism.
+- Keep `MCP_API_KEY`, `MCP_WRITER_API_KEY`, `MCP_DDL_API_KEY`, and `MCP_ADMIN_API_KEY` as separate secrets; the latter grants all application scopes and configured connections.
 - Remove all placeholder values before deployment; configuration validation fails closed on known placeholders.
 - Keep masking enabled and review sensitive-column allowlists.
 - Keep DML and DDL disabled unless a named policy and explicit approval workflow exist.
 - Set a conservative per-connection max_affected_rows; DML over that threshold is rolled back in its transaction.
 - Set require_approval to never only for read-only tools; keep approval enabled for execute_dml and execute_ddl.
 - Restrict schemas and connections explicitly; avoid wildcard schema access in production.
+- If using the environment-managed admin principal, review its all-connection allowlist and keep DML/DDL policies explicit; `admin` scopes do not disable SQL safety controls.
 - Monitor readiness, audit output, authentication failures, query latency, and database pool saturation.
 - Run the CI race detector and container build before publishing an image.
 - Treat `VERSION` changes as releases: the `main` branch workflow creates the matching immutable `vX.Y.Z` tag and refuses to move an existing tag.

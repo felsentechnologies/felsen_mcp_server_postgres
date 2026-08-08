@@ -20,6 +20,8 @@ auth:
       token_env: MCP_API_KEY
       scopes: [read]
       connections: [default]
+  # Optional environment principals are added when their token variables are
+  # set: MCP_WRITER_API_KEY, MCP_DDL_API_KEY, MCP_ADMIN_API_KEY.
 
 oauth:
   enabled: false

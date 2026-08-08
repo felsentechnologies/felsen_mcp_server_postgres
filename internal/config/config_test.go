@@ -90,6 +90,9 @@ connections:
 func TestDockerConfigHasLocalPublicBaseFallback(t *testing.T) {
 	t.Setenv("MCP_PUBLIC_BASE_URL", "")
 	t.Setenv("MCP_OAUTH_ENABLED", "false")
+	t.Setenv("MCP_WRITER_API_KEY", "")
+	t.Setenv("MCP_DDL_API_KEY", "")
+	t.Setenv("MCP_ADMIN_API_KEY", "")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@postgres:5432/mcp")
 	t.Setenv("MCP_API_KEY", "docker-config-test-reader-token")
 	t.Setenv("MCP_CITATION_SIGNING_KEY", "docker-config-test-citation-key-with-32-chars")
@@ -100,6 +103,107 @@ func TestDockerConfigHasLocalPublicBaseFallback(t *testing.T) {
 	}
 	if got := cfg.Server.PublicBaseURL; got != "http://localhost:8080" {
 		t.Fatalf("unexpected Docker local public base URL: %q", got)
+	}
+}
+
+func TestLoadAddsEnvironmentPrincipals(t *testing.T) {
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
+	t.Setenv("MCP_WRITER_API_KEY", "writer-token-with-at-least-32-characters")
+	t.Setenv("MCP_DDL_API_KEY", "ddl-token-with-at-least-32-characters")
+	t.Setenv("MCP_ADMIN_API_KEY", "admin-token-with-at-least-32-characters")
+	t.Setenv("READER_TOKEN", "reader-token")
+	t.Setenv("TEST_DSN", "postgres://user:pass@localhost:5432/postgres")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`
+auth:
+  api_keys:
+    - name: reader
+      token_env: READER_TOKEN
+      scopes: [read]
+      connections: [default]
+connections:
+  default:
+    dsn_env: TEST_DSN
+    schemas: [public]
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principals := map[string]APIKeyConfig{}
+	for _, key := range cfg.Auth.APIKeys {
+		principals[key.Name] = key
+	}
+	for _, role := range []struct {
+		name   string
+		scopes []string
+	}{
+		{name: "writer", scopes: []string{"read", "write"}},
+		{name: "ddl", scopes: []string{"read", "write", "ddl"}},
+		{name: "admin", scopes: []string{"read", "write", "ddl", "admin"}},
+	} {
+		key, ok := principals[role.name]
+		if !ok {
+			t.Fatalf("environment principal %q was not added: %#v", role.name, principals)
+		}
+		if got, want := key.Scopes, role.scopes; len(got) != len(want) {
+			t.Fatalf("principal %q scopes = %#v, want %#v", role.name, got, want)
+		}
+		for _, scope := range role.scopes {
+			if !containsFold(key.Scopes, scope) {
+				t.Fatalf("principal %q does not have scope %q: %#v", role.name, scope, key.Scopes)
+			}
+		}
+		if len(key.Connections) != 1 || key.Connections[0] != "*" {
+			t.Fatalf("principal %q connections = %#v, want [*]", role.name, key.Connections)
+		}
+	}
+}
+
+func TestLoadOAuthAdminPrincipalFromEnvironment(t *testing.T) {
+	t.Setenv("MCP_PUBLIC_BASE_URL", "https://mcp.example.com")
+	t.Setenv("MCP_OAUTH_ENABLED", "true")
+	t.Setenv("MCP_OAUTH_ISSUER", "https://mcp.example.com")
+	t.Setenv("MCP_OAUTH_RESOURCE", "https://mcp.example.com")
+	t.Setenv("MCP_OAUTH_SIGNING_KEY", "oauth-signing-key-with-at-least-32-characters")
+	t.Setenv("MCP_OAUTH_USERNAME", "chatgpt")
+	t.Setenv("MCP_OAUTH_PASSWORD", "strong-oauth-password-123")
+	t.Setenv("MCP_OAUTH_PRINCIPAL", "admin")
+	t.Setenv("MCP_OAUTH_CALLBACK_URL", "https://chatgpt.com/connector/oauth/test-admin")
+	t.Setenv("MCP_OAUTH_DEFAULT_SCOPES", "read,write,ddl,admin")
+	t.Setenv("MCP_OAUTH_BASE_SCOPES", "read,write,ddl,admin")
+	t.Setenv("MCP_API_KEY", "reader-token-with-at-least-32-characters")
+	t.Setenv("MCP_ADMIN_API_KEY", "admin-token-with-at-least-32-characters")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/postgres")
+	t.Setenv("MCP_CITATION_SIGNING_KEY", "citation-signing-key-with-at-least-32-characters")
+
+	cfg, err := Load(filepath.Join("..", "..", "Docker", "config.docker.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OAuth.Principal != "admin" {
+		t.Fatalf("OAuth principal = %q, want admin", cfg.OAuth.Principal)
+	}
+	var admin *APIKeyConfig
+	for i := range cfg.Auth.APIKeys {
+		if cfg.Auth.APIKeys[i].Name == "admin" {
+			admin = &cfg.Auth.APIKeys[i]
+			break
+		}
+	}
+	if admin == nil {
+		t.Fatal("admin principal was not created from MCP_ADMIN_API_KEY")
+	}
+	for _, scope := range []string{"read", "write", "ddl", "admin"} {
+		if !containsFold(admin.Scopes, scope) {
+			t.Fatalf("admin principal lacks scope %q: %#v", scope, admin.Scopes)
+		}
+	}
+	if len(admin.Connections) != 1 || admin.Connections[0] != "*" {
+		t.Fatalf("admin connections = %#v, want [*]", admin.Connections)
 	}
 }
 

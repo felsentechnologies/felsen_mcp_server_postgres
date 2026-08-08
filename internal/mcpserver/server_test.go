@@ -152,6 +152,36 @@ func TestObjectIDsAreConnectionScoped(t *testing.T) {
 	}
 }
 
+func TestAdminOAuthAdvertisesWriteAndDDLSecuritySchemes(t *testing.T) {
+	app := &App{cfg: &config.Config{
+		Auth: config.AuthConfig{APIKeys: []config.APIKeyConfig{{
+			Name: "admin", Scopes: []string{"read", "write", "ddl", "admin"}, Connections: []string{"*"},
+		}}},
+		OAuth: config.OAuthConfig{Enabled: true, Principal: "admin"},
+	}}
+
+	for _, test := range []struct {
+		name   string
+		scopes []string
+	}{
+		{name: "execute_dml", scopes: []string{"write"}},
+		{name: "execute_ddl", scopes: []string{"ddl"}},
+	} {
+		meta := app.toolSecurityMeta(test.scopes...)
+		if meta == nil {
+			t.Fatalf("admin tool %q did not advertise OAuth security schemes", test.name)
+		}
+		security, ok := meta["securitySchemes"].([]map[string]any)
+		if !ok || len(security) != 1 {
+			t.Fatalf("tool %q has unexpected security schemes: %#v", test.name, meta)
+		}
+		advertised, ok := security[0]["scopes"].([]string)
+		if !ok || len(advertised) != len(test.scopes) || advertised[0] != test.scopes[0] {
+			t.Fatalf("tool %q advertised scopes = %#v, want %#v", test.name, advertised, test.scopes)
+		}
+	}
+}
+
 func TestTopLevelToolSecuritySchemesMirrorMeta(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","_meta":{"securitySchemes":[{"type":"oauth2","scopes":["read"]}]}}]}}`)
 	transformed := addTopLevelToolSecuritySchemes(body, "application/json")

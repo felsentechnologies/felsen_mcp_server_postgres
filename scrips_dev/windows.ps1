@@ -4,6 +4,9 @@ param(
     [int]$HostPort = 8080,
     [string]$DatabaseUrl = "",
     [string]$McpApiKey = "",
+    [string]$McpWriterApiKey = "",
+    [string]$McpDdlApiKey = "",
+    [string]$McpAdminApiKey = "",
     [string]$CitationSigningKey = "",
     [string]$PublicBaseUrl = "",
     [bool]$OAuthEnabled = $false,
@@ -16,6 +19,8 @@ param(
     [string]$OAuthClientId = "",
     [string]$OAuthCallbackUrl = "",
     [string]$OAuthClientStorePath = "",
+    [string]$OAuthDefaultScopes = "",
+    [string]$OAuthBaseScopes = "",
     [int]$PostgresPort = 5432,
     [string]$PostgresDb = "",
     [string]$PostgresUser = "",
@@ -48,6 +53,9 @@ $ImageNameWasProvided = $PSBoundParameters.ContainsKey("ImageName")
 $ImageTagWasProvided = $PSBoundParameters.ContainsKey("ImageTag")
 $DatabaseUrlWasProvided = -not [string]::IsNullOrWhiteSpace($DatabaseUrl)
 $McpApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpApiKey)
+$McpWriterApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpWriterApiKey)
+$McpDdlApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpDdlApiKey)
+$McpAdminApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpAdminApiKey)
 $CitationSigningKeyWasProvided = -not [string]::IsNullOrWhiteSpace($CitationSigningKey)
 $OAuthEnabledWasProvided = $PSBoundParameters.ContainsKey("OAuthEnabled")
 $OAuthIssuerWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthIssuer)
@@ -59,6 +67,8 @@ $OAuthPrincipalWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthPrincipal)
 $OAuthClientIdWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthClientId)
 $OAuthCallbackUrlWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthCallbackUrl)
 $OAuthClientStorePathWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthClientStorePath)
+$OAuthDefaultScopesWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthDefaultScopes)
+$OAuthBaseScopesWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthBaseScopes)
 
 function Write-Title {
     param([string]$Text)
@@ -226,6 +236,16 @@ function Sync-DevEnv {
         }
     }
 
+    if (-not $McpWriterApiKeyWasProvided -and $values.ContainsKey("MCP_WRITER_API_KEY")) {
+        $script:McpWriterApiKey = $values["MCP_WRITER_API_KEY"]
+    }
+    if (-not $McpDdlApiKeyWasProvided -and $values.ContainsKey("MCP_DDL_API_KEY")) {
+        $script:McpDdlApiKey = $values["MCP_DDL_API_KEY"]
+    }
+    if (-not $McpAdminApiKeyWasProvided -and $values.ContainsKey("MCP_ADMIN_API_KEY")) {
+        $script:McpAdminApiKey = $values["MCP_ADMIN_API_KEY"]
+    }
+
     if (-not $CitationSigningKeyWasProvided) {
         if ($values.ContainsKey("MCP_CITATION_SIGNING_KEY") -and -not [string]::IsNullOrWhiteSpace($values["MCP_CITATION_SIGNING_KEY"])) {
             $script:CitationSigningKey = $values["MCP_CITATION_SIGNING_KEY"]
@@ -280,6 +300,12 @@ function Sync-DevEnv {
     if (-not $OAuthClientStorePathWasProvided -and $values.ContainsKey("MCP_OAUTH_CLIENT_STORE_PATH")) {
         $script:OAuthClientStorePath = $values["MCP_OAUTH_CLIENT_STORE_PATH"]
     }
+    if (-not $OAuthDefaultScopesWasProvided -and $values.ContainsKey("MCP_OAUTH_DEFAULT_SCOPES")) {
+        $script:OAuthDefaultScopes = $values["MCP_OAUTH_DEFAULT_SCOPES"]
+    }
+    if (-not $OAuthBaseScopesWasProvided -and $values.ContainsKey("MCP_OAUTH_BASE_SCOPES")) {
+        $script:OAuthBaseScopes = $values["MCP_OAUTH_BASE_SCOPES"]
+    }
     if ([string]::IsNullOrWhiteSpace($OAuthIssuer)) {
         $script:OAuthIssuer = $PublicBaseUrl
     }
@@ -291,6 +317,12 @@ function Sync-DevEnv {
     }
     if ([string]::IsNullOrWhiteSpace($OAuthClientId)) {
         $script:OAuthClientId = "felsen-chatgpt"
+    }
+    if ([string]::IsNullOrWhiteSpace($OAuthDefaultScopes)) {
+        $script:OAuthDefaultScopes = "read"
+    }
+    if ([string]::IsNullOrWhiteSpace($OAuthBaseScopes)) {
+        $script:OAuthBaseScopes = "read"
     }
     if ($OAuthEnabled) {
         if ([string]::IsNullOrWhiteSpace($OAuthSigningKey) -or $OAuthSigningKey -match "(?i)^(change-me|replace-with|your-)") {
@@ -328,6 +360,9 @@ function Save-EnvFile {
     $lines += "POSTGRES_PASSWORD=$PostgresPassword"
     $lines += "POSTGRES_PORT=$PostgresPort"
     $lines += "MCP_API_KEY=$McpApiKey"
+    $lines += "MCP_WRITER_API_KEY=$McpWriterApiKey"
+    $lines += "MCP_DDL_API_KEY=$McpDdlApiKey"
+    $lines += "MCP_ADMIN_API_KEY=$McpAdminApiKey"
     $lines += "MCP_CITATION_SIGNING_KEY=$CitationSigningKey"
     $lines += "MCP_PUBLIC_BASE_URL=$PublicBaseUrl"
     $lines += "MCP_OAUTH_ENABLED=$($OAuthEnabled.ToString().ToLowerInvariant())"
@@ -340,6 +375,8 @@ function Save-EnvFile {
     $lines += "MCP_OAUTH_CLIENT_ID=$OAuthClientId"
     $lines += "MCP_OAUTH_CALLBACK_URL=$OAuthCallbackUrl"
     $lines += "MCP_OAUTH_CLIENT_STORE_PATH=$OAuthClientStorePath"
+    $lines += "MCP_OAUTH_DEFAULT_SCOPES=$OAuthDefaultScopes"
+    $lines += "MCP_OAUTH_BASE_SCOPES=$OAuthBaseScopes"
     $lines += "MCP_VERSION=$(Get-ProjectVersion)"
     $lines += "HTTP_PORT=$HostPort"
     $lines += "MCP_PORT=$HostPort"
@@ -378,6 +415,15 @@ function Sync-Env {
     }
     if ([string]::IsNullOrWhiteSpace($McpApiKey) -or $McpApiKey.Length -lt 32 -or $McpApiKey -match "(?i)(change-me|replace-with|your-|secret|password)" ) {
         throw "MCP_API_KEY is required, must have at least 32 characters, and cannot be a placeholder."
+    }
+    foreach ($item in @(
+        @{ Name = "MCP_WRITER_API_KEY"; Value = $McpWriterApiKey },
+        @{ Name = "MCP_DDL_API_KEY"; Value = $McpDdlApiKey },
+        @{ Name = "MCP_ADMIN_API_KEY"; Value = $McpAdminApiKey }
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace($item.Value) -and ($item.Value.Length -lt 32 -or $item.Value -match "(?i)(change-me|replace-with|your-|secret|password)")) {
+            throw "$($item.Name) must have at least 32 characters and cannot be a placeholder when configured."
+        }
     }
     if ([string]::IsNullOrWhiteSpace($CitationSigningKey) -or $CitationSigningKey.Length -lt 32 -or $CitationSigningKey -match "(?i)(change-me|replace-with|your-)" ) {
         throw "MCP_CITATION_SIGNING_KEY is required, must have at least 32 characters, and cannot be a placeholder."
@@ -421,6 +467,24 @@ function Sync-Env {
         }
         if ($callbackUrl.Query -ne "" -or $callbackUrl.Fragment -ne "") {
             throw "MCP_OAUTH_CALLBACK_URL cannot contain a query or fragment."
+        }
+        if ($OAuthPrincipal -eq "admin" -and [string]::IsNullOrWhiteSpace($McpAdminApiKey)) {
+            throw "MCP_ADMIN_API_KEY is required when MCP_OAUTH_PRINCIPAL=admin."
+        }
+        $validScopes = @("read", "write", "ddl", "admin")
+        foreach ($scopeList in @(
+            @{ Name = "MCP_OAUTH_DEFAULT_SCOPES"; Value = $OAuthDefaultScopes },
+            @{ Name = "MCP_OAUTH_BASE_SCOPES"; Value = $OAuthBaseScopes }
+        )) {
+            $scopes = @($scopeList.Value -split "[,\s]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($scopes.Count -eq 0) {
+                throw "$($scopeList.Name) must contain at least one scope."
+            }
+            foreach ($scope in $scopes) {
+                if ($validScopes -notcontains $scope.ToLowerInvariant()) {
+                    throw "$($scopeList.Name) contains unsupported scope '$scope'. Valid scopes: $($validScopes -join ', ')."
+                }
+            }
         }
     }
     [void](Get-ProjectVersion)
@@ -475,6 +539,9 @@ function Set-ComposeEnvironment {
     $env:POSTGRES_USER = $PostgresUser
     $env:POSTGRES_PASSWORD = $PostgresPassword
     $env:MCP_API_KEY = $McpApiKey
+    $env:MCP_WRITER_API_KEY = $McpWriterApiKey
+    $env:MCP_DDL_API_KEY = $McpDdlApiKey
+    $env:MCP_ADMIN_API_KEY = $McpAdminApiKey
     $env:MCP_CITATION_SIGNING_KEY = $CitationSigningKey
     $env:MCP_PUBLIC_BASE_URL = $PublicBaseUrl
     $env:MCP_OAUTH_ENABLED = $OAuthEnabled.ToString().ToLowerInvariant()
@@ -487,6 +554,8 @@ function Set-ComposeEnvironment {
     $env:MCP_OAUTH_CLIENT_ID = $OAuthClientId
     $env:MCP_OAUTH_CALLBACK_URL = $OAuthCallbackUrl
     $env:MCP_OAUTH_CLIENT_STORE_PATH = $OAuthClientStorePath
+    $env:MCP_OAUTH_DEFAULT_SCOPES = $OAuthDefaultScopes
+    $env:MCP_OAUTH_BASE_SCOPES = $OAuthBaseScopes
     $env:MCP_VERSION = Get-ProjectVersion
     $env:MCP_COMMIT = Get-GitCommit
     $env:MCP_BUILD_DATE = Get-BuildDate
@@ -865,6 +934,8 @@ function Write-StackInfo {
     if ($OAuthEnabled) {
         Write-Host "OAuth Auth:   $($PublicBaseUrl.TrimEnd('/'))/oauth/authorize" -ForegroundColor Green
         Write-Host "OAuth Token:  $($PublicBaseUrl.TrimEnd('/'))/oauth/token" -ForegroundColor Green
+        Write-Host "OAuth Principal: $OAuthPrincipal" -ForegroundColor Green
+        Write-Host "OAuth Scopes: $OAuthBaseScopes / $OAuthDefaultScopes" -ForegroundColor Green
         Write-Host "OAuth Callback: $OAuthCallbackUrl" -ForegroundColor Green
     }
     Write-Host ""
@@ -886,6 +957,7 @@ function Show-Menu {
     Write-Host "Porta MCP:     $HostPort"
     Write-Host "Porta PG:      $PostgresPort"
     Write-Host "API Key:       $(if ($McpApiKey) { 'configurado' } else { 'sera gerada' })"
+    Write-Host "Admin Key:     $(if ($McpAdminApiKey) { 'configurado' } else { 'nao configurado' })"
     Write-Host "OAuth:         $(if ($OAuthEnabled) { 'habilitado' } else { 'desabilitado' })"
     Write-Host ""
     Write-Host "1. Buildar imagem Docker"

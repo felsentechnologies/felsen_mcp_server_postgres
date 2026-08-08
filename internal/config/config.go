@@ -30,6 +30,22 @@ const (
 	defaultCitationTTL = "15m"
 )
 
+type environmentPrincipal struct {
+	name        string
+	tokenEnv    string
+	scopes      []string
+	connections []string
+}
+
+// These optional environment principals keep the Docker/Swarm deployment
+// ergonomic while preserving the read-only reader principal as the default.
+// A principal is added only when its token environment variable is set.
+var environmentPrincipals = []environmentPrincipal{
+	{name: "writer", tokenEnv: "MCP_WRITER_API_KEY", scopes: []string{"read", "write"}, connections: []string{"*"}},
+	{name: "ddl", tokenEnv: "MCP_DDL_API_KEY", scopes: []string{"read", "write", "ddl"}, connections: []string{"*"}},
+	{name: "admin", tokenEnv: "MCP_ADMIN_API_KEY", scopes: []string{"read", "write", "ddl", "admin"}, connections: []string{"*"}},
+}
+
 type Config struct {
 	Server      ServerConfig                `json:"server" yaml:"server"`
 	Auth        AuthConfig                  `json:"auth" yaml:"auth"`
@@ -276,6 +292,7 @@ func applyDefaults(cfg *Config) {
 		}
 		cfg.Auth.APIKeys[i] = key
 	}
+	applyEnvironmentPrincipals(cfg)
 	if cfg.Server.CitationSigningKey == "" && cfg.Server.CitationSigningKeyEnv != "" {
 		cfg.Server.CitationSigningKey = os.Getenv(cfg.Server.CitationSigningKeyEnv)
 	}
@@ -389,6 +406,39 @@ func applyOAuthDefaults(cfg *Config) {
 	oauth.BaseScopes = normalizeConfigList(oauth.BaseScopes)
 }
 
+func applyEnvironmentPrincipals(cfg *Config) {
+	for _, role := range environmentPrincipals {
+		token := strings.TrimSpace(os.Getenv(role.tokenEnv))
+		if token == "" || hasAPIKeyName(cfg.Auth.APIKeys, role.name) {
+			continue
+		}
+		cfg.Auth.APIKeys = append(cfg.Auth.APIKeys, APIKeyConfig{
+			Name:        role.name,
+			Token:       token,
+			Scopes:      append([]string(nil), role.scopes...),
+			Connections: append([]string(nil), role.connections...),
+		})
+	}
+}
+
+func hasAPIKeyName(keys []APIKeyConfig, name string) bool {
+	for _, key := range keys {
+		if strings.EqualFold(strings.TrimSpace(key.Name), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func environmentPrincipalTokenEnv(name string) string {
+	for _, role := range environmentPrincipals {
+		if strings.EqualFold(strings.TrimSpace(name), role.name) {
+			return role.tokenEnv
+		}
+	}
+	return ""
+}
+
 func (cfg *Config) Validate() error {
 	if len(cfg.Connections) == 0 {
 		return errors.New("at least one connection is required")
@@ -491,6 +541,9 @@ func (cfg *Config) Validate() error {
 		}
 		principal, ok := principalNames[cfg.OAuth.Principal]
 		if !ok {
+			if tokenEnv := environmentPrincipalTokenEnv(cfg.OAuth.Principal); tokenEnv != "" {
+				return fmt.Errorf("oauth.principal %q does not match an auth api key; set %s or declare the principal in the selected config", cfg.OAuth.Principal, tokenEnv)
+			}
 			return fmt.Errorf("oauth.principal %q does not match an auth api key", cfg.OAuth.Principal)
 		}
 		if len(cfg.OAuth.RedirectURIs) == 0 {

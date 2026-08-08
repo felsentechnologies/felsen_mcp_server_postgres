@@ -20,6 +20,8 @@ auth:
       token_env: MCP_API_KEY
       scopes: [read]
       connections: [default]
+  # Optional environment principals are added when their token variables are
+  # set: MCP_WRITER_API_KEY, MCP_DDL_API_KEY, MCP_ADMIN_API_KEY.
 
 # OAuth 2.1 is disabled by default for local Compose. Enable it in the
 # environment for the ChatGPT connector and provide the secret values below.
