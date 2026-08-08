@@ -78,10 +78,22 @@ MCP_OAUTH_PASSWORD=your-long-random-oauth-password
 MCP_OAUTH_PRINCIPAL=reader
 MCP_OAUTH_CLIENT_ID=felsen-chatgpt
 MCP_OAUTH_CALLBACK_URL=https://chatgpt.com/connector/oauth/<callback-id>
+MCP_OAUTH_DEFAULT_SCOPES=read
+MCP_OAUTH_BASE_SCOPES=read
+# Only required when the selected config defines an admin principal.
+# MCP_ADMIN_API_KEY=your-long-random-admin-token
 HTTP_PORT=8080
 IMAGE_NAME=mcp-postgres
 IMAGE_TAG=v0.4.0
 ```
+
+`MCP_OAUTH_PRINCIPAL` is the name of an `auth.api_keys` entry, not a scope.
+The shipped Docker config defines `reader` with read access. For an explicit
+full-access profile, add an `admin` entry to the selected config with
+`scopes: [read, write, ddl, admin]` and the intended `connections` allowlist,
+then set the principal to `admin` and both scope variables to
+`read,write,ddl,admin`. The `admin` scope still does not bypass SQL guard
+policies, row/affected-row limits, or the connection's `ddl_enabled` flag.
 
 For a versioned Swarm deployment, publish the image as `IMAGE_NAME:IMAGE_TAG`
 and set the same `IMAGE_TAG` in the stack variables. `latest` is convenient for

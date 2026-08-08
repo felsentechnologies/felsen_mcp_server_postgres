@@ -57,6 +57,8 @@ MCP_OAUTH_USERNAME=<connector-login>
 MCP_OAUTH_PASSWORD=<long-random-password>
 MCP_OAUTH_PRINCIPAL=reader
 MCP_OAUTH_CALLBACK_URL=https://chatgpt.com/connector/oauth/<callback-id>
+MCP_OAUTH_DEFAULT_SCOPES=read
+MCP_OAUTH_BASE_SCOPES=read
 ```
 
 The protected-resource metadata, authorization-server metadata, DCR, authorization, and token endpoints are respectively exposed at:
@@ -69,7 +71,9 @@ The protected-resource metadata, authorization-server metadata, DCR, authorizati
 /oauth/token
 ```
 
-In ChatGPT's advanced authentication settings, use Dynamic Client Registration after the registration endpoint is discovered. If using User-Defined OAuth Client, use client ID `felsen-chatgpt`, leave the client secret empty, select token endpoint auth method `none`, and use `read` as the default/base scope. Set `MCP_OAUTH_CALLBACK_URL` in `.env` to the exact callback URL shown by ChatGPT, then restart the server. This value is required when OAuth is enabled, and the static client compares `redirect_uri` exactly against it; no callback domain or path is hardcoded. Dynamic registrations retain the exact callback URL submitted by ChatGPT. OIDC remains intentionally disabled because this bootstrap provider does not claim an email identity.
+In ChatGPT's advanced authentication settings, use Dynamic Client Registration after the registration endpoint is discovered. If using User-Defined OAuth Client, use client ID `felsen-chatgpt`, leave the client secret empty, select token endpoint auth method `none`, and use the configured default/base scopes. Set `MCP_OAUTH_CALLBACK_URL` in `.env` to the exact callback URL shown by ChatGPT, then restart the server. This value is required when OAuth is enabled, and the static client compares `redirect_uri` exactly against it; no callback domain or path is hardcoded. Dynamic registrations retain the exact callback URL submitted by ChatGPT. OIDC remains intentionally disabled because this bootstrap provider does not claim an email identity.
+
+`MCP_OAUTH_PRINCIPAL` is the name of an entry under `auth.api_keys`, not a scope. The shipped Docker configuration has a read-only `reader` principal. To grant full application-level access, define an `admin` principal with `read`, `write`, `ddl`, and `admin` scopes and the required connection allowlist, then set `MCP_OAUTH_PRINCIPAL=admin`, `MCP_OAUTH_DEFAULT_SCOPES=read,write,ddl,admin`, and `MCP_OAUTH_BASE_SCOPES=read,write,ddl,admin`. The `admin` scope does not bypass the SQL safety guard, DML policies, row limits, or a connection's `ddl_enabled` setting.
 
 The MCP endpoint still returns a standards-compliant `401` with `resource_metadata` when no bearer is present. ChatGPT uses that challenge to discover OAuth and then calls `initialize`/`tools/list` with the access token; `tools/list` is not made public because exposing discovery must not bypass database authorization. Existing API-key bearer clients continue to work.
 
