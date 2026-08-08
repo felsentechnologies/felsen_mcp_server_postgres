@@ -125,10 +125,10 @@ The repository root `VERSION` file is the SemVer source of truth. It is advertis
 - Bearer authentication is required for MCP and SSE; source URLs use short-lived signatures or Bearer authentication, and bare tokens are rejected. When OAuth is enabled, the 401 challenge advertises the protected-resource metadata URL.
 - API keys must declare read, write, ddl, or admin scopes and allowed connections.
 - YAML/JSON unknown fields fail configuration loading.
-- The SQL guard is conservative and denies comments, dollar-quoted strings, multiple statements/relation lists, row-locking clauses, dangerous functions, CTEs, and non-allowlisted DDL.
+- The SQL guard is conservative and denies comments, dollar-quoted strings, multiple statements/relation lists, row-locking clauses, dangerous functions, CTEs, and non-allowlisted DDL. It supports common schema-management forms including INSERT ... ON CONFLICT, CREATE INDEX, table definitions with FOREIGN KEY ... REFERENCES, and foreign-key ON DELETE/UPDATE actions.
 - Read SQL runs in a PostgreSQL READ ONLY transaction.
 - SQL result rows are capped server-side, including queries that already contain a larger LIMIT.
-- DML is enabled by the shipped wildcard policy for configured schemas and rolls back when `max_affected_rows` (100 by default) is exceeded; DDL is enabled by default in the shipped configurations and still rejects CASCADE and multi-object operations.
+- DML is enabled by the shipped wildcard policy for configured schemas and rolls back when `max_affected_rows` (100 by default) is exceeded; DDL is enabled by default in the shipped configurations, supports common table/index/constraint operations, rejects destructive CASCADE and multi-object operations, and permits CASCADE only as a foreign-key referential action.
 - Results are masked using sensitive-column patterns unless explicitly allowed by connection configuration.
 - HTTP body size, request concurrency, read/write/idle timeouts, readiness checks, and audit write errors are enforced.
 

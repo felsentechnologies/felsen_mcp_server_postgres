@@ -89,7 +89,7 @@ MCP_ADMIN_API_KEY=your-long-random-admin-token
 # MCP_DDL_API_KEY=your-long-random-ddl-token
 HTTP_PORT=8080
 IMAGE_NAME=mcp-postgres
-IMAGE_TAG=v0.4.2
+IMAGE_TAG=v0.4.3
 ```
 
 `MCP_OAUTH_PRINCIPAL` is the name of an `auth.api_keys` entry, not a scope.

@@ -59,14 +59,56 @@ func TestValidateDMLPolicy(t *testing.T) {
 		t.Fatalf("expected delete to be denied: %#v", blocked)
 	}
 	upsert := Validate("insert into public.users (id, email) values (1, 'x') on conflict (id) do update set email = excluded.email", testConnectionConfig(), ModeDML)
-	if upsert.Valid {
-		t.Fatalf("expected upsert to require an explicit update policy: %#v", upsert)
+	if !upsert.Valid {
+		t.Fatalf("expected upsert to be allowed when insert and update are both allowlisted: %#v", upsert)
+	}
+	nothing := Validate("insert into public.users (id, email) values (1, 'x') on conflict (id) do nothing", testConnectionConfig(), ModeDML)
+	if !nothing.Valid {
+		t.Fatalf("expected ON CONFLICT DO NOTHING to be allowed: %#v", nothing)
+	}
+	upsertWithoutUpdate := testConnectionConfig()
+	upsertWithoutUpdate.DMLPolicies[0].Operations = []string{"insert"}
+	blockedUpsert := Validate("insert into public.users (id, email) values (1, 'x') on conflict (id) do update set email = excluded.email", upsertWithoutUpdate, ModeDML)
+	if blockedUpsert.Valid {
+		t.Fatalf("expected ON CONFLICT DO UPDATE to require an update policy: %#v", blockedUpsert)
 	}
 	deleteCfg := testConnectionConfig()
 	deleteCfg.DMLPolicies[0].Operations = append(deleteCfg.DMLPolicies[0].Operations, "delete")
 	deleteUsing := Validate("delete from public.users using private.accounts where public.users.id = private.accounts.id", deleteCfg, ModeDML)
 	if deleteUsing.Valid {
 		t.Fatalf("expected DELETE USING to enforce every referenced schema: %#v", deleteUsing)
+	}
+}
+
+func TestValidateCommonDatabaseManagementDDL(t *testing.T) {
+	cfg := testConnectionConfig()
+	ddlEnabled := true
+	cfg.DDLEnabled = &ddlEnabled
+	cfg.Schemas = []string{"public"}
+
+	for _, sql := range []string{
+		"create index users_email_idx on public.users (email)",
+		"create unique index if not exists users_email_idx on public.users using btree (email)",
+		"create index on only public.users (email)",
+		"create table public.accounts (id bigint primary key)",
+		"create table public.orders (id bigint primary key, account_id bigint references public.accounts(id) on delete cascade on update cascade)",
+		"alter table public.orders add constraint orders_account_fk foreign key (account_id) references public.accounts(id) on delete cascade",
+		"alter table only public.orders add constraint orders_account_fk_2 foreign key (account_id) references public.accounts(id)",
+	} {
+		result := Validate(sql, cfg, ModeDDL)
+		if !result.Valid {
+			t.Fatalf("expected common database DDL to be allowed for %q: %#v", sql, result)
+		}
+	}
+}
+
+func TestValidateDDLStillHonorsDisabledFlag(t *testing.T) {
+	cfg := testConnectionConfig()
+	ddlEnabled := false
+	cfg.DDLEnabled = &ddlEnabled
+	result := Validate("create index users_email_idx on public.users (email)", cfg, ModeDDL)
+	if result.Valid || result.Reason != "DDL is not enabled for this connection" {
+		t.Fatalf("expected disabled DDL to remain blocked: %#v", result)
 	}
 }
 

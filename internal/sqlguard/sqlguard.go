@@ -184,8 +184,8 @@ func DetectDDLTablesWithError(tokens []token) ([]string, error) {
 	if len(tokens) == 0 {
 		return nil, fmt.Errorf("DDL statement must identify an object")
 	}
-	if containsKeyword(tokens, "cascade") {
-		return nil, fmt.Errorf("CASCADE is not allowed for DDL")
+	if hasUnsafeDDLCascade(tokens, operationFromTokens(tokens)) {
+		return nil, fmt.Errorf("CASCADE is only allowed as a foreign-key referential action")
 	}
 
 	switch operationFromTokens(tokens) {
@@ -200,6 +200,20 @@ func DetectDDLTablesWithError(tokens []token) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unsupported DDL operation")
 	}
+}
+
+func hasUnsafeDDLCascade(tokens []token, op string) bool {
+	for i, tok := range tokens {
+		if !isKeyword(tok, "cascade") {
+			continue
+		}
+		if (op == "create" || op == "alter") && i >= 2 && isKeyword(tokens[i-2], "on") &&
+			(isKeyword(tokens[i-1], "delete") || isKeyword(tokens[i-1], "update")) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func SplitTable(table string) (string, string) {
@@ -388,8 +402,11 @@ func validateStatementTokens(tokens []token) error {
 		switch word {
 		case "begin", "commit", "rollback", "savepoint", "release",
 			"copy", "listen", "notify", "vacuum", "analyze",
-			"reset", "do", "call", "prepare", "execute", "deallocate",
+			"reset", "call", "prepare", "execute", "deallocate",
 			"grant", "revoke":
+			return fmt.Errorf("SQL operation or function %q is not allowed", tok.text)
+		}
+		if word == "do" && !containsSequence(tokens[:i], "on", "conflict") {
 			return fmt.Errorf("SQL operation or function %q is not allowed", tok.text)
 		}
 	}
@@ -461,7 +478,8 @@ func detectTableRefs(tokens []token, op string) ([]string, error) {
 		if isKeyword(tokens[i], "using") && start < len(tokens) && tokens[start].text == "(" {
 			continue
 		}
-		table, next, err := relationAt(tokens, start)
+		allowTrailingParentheses := isKeyword(tokens[i], "into") || isKeyword(tokens[i], "references")
+		table, next, err := relationAtWithOptions(tokens, start, allowTrailingParentheses)
 		if err != nil {
 			return nil, err
 		}
@@ -487,6 +505,14 @@ func detectTableRefs(tokens []token, op string) ([]string, error) {
 }
 
 func relationAt(tokens []token, start int) (string, int, error) {
+	return relationAtWithOptions(tokens, start, false)
+}
+
+func relationAtWithTrailingParentheses(tokens []token, start int) (string, int, error) {
+	return relationAtWithOptions(tokens, start, true)
+}
+
+func relationAtWithOptions(tokens []token, start int, allowTrailingParentheses bool) (string, int, error) {
 	if start >= len(tokens) || tokens[start].kind != tokenIdentifier {
 		return "", start, fmt.Errorf("table references must use simple schema.table identifiers")
 	}
@@ -507,7 +533,10 @@ func relationAt(tokens []token, start int) (string, int, error) {
 		}
 		first = first + "." + second
 	}
-	if next < len(tokens) && (tokens[next].text == "(" || tokens[next].text == "*") {
+	if next < len(tokens) && tokens[next].text == "*" {
+		return "", next, fmt.Errorf("table functions and inheritance wildcards are not allowed")
+	}
+	if next < len(tokens) && tokens[next].text == "(" && !allowTrailingParentheses {
 		return "", next, fmt.Errorf("table functions and inheritance wildcards are not allowed")
 	}
 	return normalizeTable(first), next, nil
@@ -542,7 +571,7 @@ func parseCreateTables(tokens []token) ([]string, error) {
 	if i < len(tokens) && isKeyword(tokens[i], "table") {
 		i++
 		i = skipIfNotExists(tokens, i)
-		table, _, err := relationAt(tokens, i)
+		table, _, err := relationAtWithTrailingParentheses(tokens, i)
 		if err != nil {
 			return nil, err
 		}
@@ -559,9 +588,14 @@ func parseCreateTables(tokens []token) ([]string, error) {
 		return nil, fmt.Errorf("CREATE INDEX CONCURRENTLY is not allowed")
 	}
 	i = skipIfNotExists(tokens, i)
-	index, next, err := relationAt(tokens, i)
-	if err != nil {
-		return nil, err
+	var index string
+	next := i
+	var err error
+	if i >= len(tokens) || !isKeyword(tokens[i], "on") {
+		index, next, err = relationAt(tokens, i)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for next < len(tokens) && !isKeyword(tokens[next], "on") {
 		next++
@@ -569,7 +603,11 @@ func parseCreateTables(tokens []token) ([]string, error) {
 	if next >= len(tokens) {
 		return nil, fmt.Errorf("CREATE INDEX must identify its target table with ON")
 	}
-	target, _, err := relationAt(tokens, next+1)
+	targetStart := next + 1
+	if targetStart < len(tokens) && isKeyword(tokens[targetStart], "only") {
+		targetStart++
+	}
+	target, _, err := relationAtWithTrailingParentheses(tokens, targetStart)
 	if err != nil {
 		return nil, err
 	}
@@ -581,6 +619,9 @@ func parseAlterTables(tokens []token) ([]string, error) {
 		return nil, fmt.Errorf("only ALTER TABLE is allowed")
 	}
 	i := skipIfExists(tokens, 2)
+	if i < len(tokens) && isKeyword(tokens[i], "only") {
+		i++
+	}
 	table, next, err := relationAt(tokens, i)
 	if err != nil {
 		return nil, err
