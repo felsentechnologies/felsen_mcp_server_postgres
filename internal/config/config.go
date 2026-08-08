@@ -200,8 +200,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.Server.Endpoint == "" {
 		cfg.Server.Endpoint = defaultEndpoint
 	}
-	if cfg.Server.PublicBaseURL == "" {
-		cfg.Server.PublicBaseURL = os.Getenv("MCP_PUBLIC_BASE_URL")
+	if publicBaseURL := os.Getenv("MCP_PUBLIC_BASE_URL"); publicBaseURL != "" {
+		cfg.Server.PublicBaseURL = publicBaseURL
 	}
 	if cfg.Server.CitationTTL == "" {
 		cfg.Server.CitationTTL = defaultCitationTTL

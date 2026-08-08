@@ -18,7 +18,7 @@ services:
     image: ${IMAGE_NAME:-mcp-postgres}:${IMAGE_TAG:-latest}
     environment:
       POSTGRES_MCP_CONFIG: ${POSTGRES_MCP_CONFIG:-/app/Docker/config.docker.yaml}
-      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:?MCP_PUBLIC_BASE_URL is required}
+      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:?MCP_PUBLIC_BASE_URL is required in production}
       MCP_CITATION_SIGNING_KEY: ${MCP_CITATION_SIGNING_KEY:?MCP_CITATION_SIGNING_KEY is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       MCP_API_KEY: ${MCP_API_KEY:?MCP_API_KEY is required}

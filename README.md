@@ -26,7 +26,7 @@ http://127.0.0.1:8080/mcp
 
 Every MCP request must send Authorization: Bearer <MCP_API_KEY>. The example configuration grants only read access to the public schema, enables masking, disables DML/DDL, and caps results at 100 rows. Do not put tokens directly in YAML or commit real credentials.
 
-server.public_base_url is required because search and fetch return absolute, user-openable citation URLs. The example signs source URLs with MCP_CITATION_SIGNING_KEY for 15 minutes; keep that key secret. For a published deployment, set public_base_url to the public HTTPS origin of the service.
+`server.public_base_url` is required because search and fetch return absolute, user-openable citation URLs. The local Docker stack defaults it to `http://localhost:8080`; for a published deployment, set `MCP_PUBLIC_BASE_URL` to the public HTTPS origin. The example signs source URLs with `MCP_CITATION_SIGNING_KEY` for 15 minutes; keep that key secret.
 
 ## MCP/OpenAI integration
 

@@ -7,6 +7,7 @@ import (
 )
 
 func TestLoadYAMLConfig(t *testing.T) {
+	t.Setenv("MCP_PUBLIC_BASE_URL", "")
 	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte(`
@@ -50,6 +51,52 @@ connections:
 	}
 	if got := cfg.Connections["crm"].MaxAffectedRows; got != defaultMaxAffected {
 		t.Fatalf("unexpected default max_affected_rows: %d", got)
+	}
+}
+
+func TestPublicBaseURLEnvironmentOverridesFile(t *testing.T) {
+	t.Setenv("MCP_PUBLIC_BASE_URL", "https://public.example.com")
+	t.Setenv("TEST_MCP_TOKEN", "test-token")
+	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`
+server:
+  public_base_url: http://localhost:9000
+auth:
+  api_keys:
+    - name: reader
+      token_env: TEST_MCP_TOKEN
+      scopes: [read]
+      connections: [crm]
+connections:
+  crm:
+    dsn_env: CRM_DSN
+    schemas: [public]
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Server.PublicBaseURL; got != "https://public.example.com" {
+		t.Fatalf("environment public base URL did not override file value: %q", got)
+	}
+}
+
+func TestDockerConfigHasLocalPublicBaseFallback(t *testing.T) {
+	t.Setenv("MCP_PUBLIC_BASE_URL", "")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@postgres:5432/mcp")
+	t.Setenv("MCP_API_KEY", "docker-config-test-reader-token")
+	t.Setenv("MCP_CITATION_SIGNING_KEY", "docker-config-test-citation-key-with-32-chars")
+	path := filepath.Join("..", "..", "Docker", "config.docker.yaml")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Server.PublicBaseURL; got != "http://localhost:8080" {
+		t.Fatalf("unexpected Docker local public base URL: %q", got)
 	}
 }
 

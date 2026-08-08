@@ -57,7 +57,9 @@ The Swarm file includes:
 The stack accepts Portainer environment variables because every required value is
 referenced under `services.postgres-mcp.environment` in `docker-compose.yaml`.
 
-Set all of these values with real credentials:
+For local Docker development, `MCP_PUBLIC_BASE_URL` defaults to
+`http://localhost:8080`. Set it explicitly for any published deployment.
+Set all credential values with real secrets:
 
 ```text
 POSTGRES_DB=mcp
