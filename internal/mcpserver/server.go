@@ -33,10 +33,13 @@ type App struct {
 
 func New(cfg *config.Config, store *postgres.Store, auth *authn.Manager, auditor *audit.Auditor, logger *slog.Logger) http.Handler {
 	app := &App{cfg: cfg, store: store, auth: auth, auditor: auditor, logger: logger}
-	app.server = mcp.NewServer(&mcp.Implementation{Name: "postgres-mcp", Version: "v0.1.0"}, nil)
+	app.server = mcp.NewServer(&mcp.Implementation{Name: "postgres-mcp", Version: "v0.2.0"}, nil)
 	app.registerResources()
 	app.registerTools()
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+
+	mux := http.NewServeMux()
+
+	streamableHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return app.server
 	}, &mcp.StreamableHTTPOptions{
 		JSONResponse:   cfg.Server.JSONResponse,
@@ -44,6 +47,16 @@ func New(cfg *config.Config, store *postgres.Store, auth *authn.Manager, auditor
 		SessionTimeout: cfg.Server.SessionTimeoutDuration(),
 		Logger:         logger,
 	})
+
+	sseHandler := mcp.NewSSEHandler(func(*http.Request) *mcp.Server {
+		return app.server
+	}, nil)
+
+	mux.Handle("/mcp", streamableHandler)
+	mux.Handle("/sse", sseHandler)
+	mux.Handle("/sse/", sseHandler)
+
+	return mux
 }
 
 func (a *App) registerResources() {
@@ -87,6 +100,8 @@ func (a *App) registerTools() {
 	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_ddl", Description: "Execute DDL statements (CREATE, ALTER, DROP, TRUNCATE) when DDL is enabled for the connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDDL)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "refresh_schema_cache", Description: "Clear cached schema descriptions for a connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.refreshSchemaCache)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "search", Description: "Search for tables, columns, and database objects matching a query.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.search)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "fetch", Description: "Fetch detailed information about a database object by ID (schema.table or schema.table.column).", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.fetch)
 }
 
 type connectionInput struct {
@@ -140,6 +155,34 @@ type validateSQLInput struct {
 type refreshCacheOutput struct {
 	ConnectionName string `json:"connection_name"`
 	Refreshed      bool   `json:"refreshed"`
+}
+
+type searchInput struct {
+	Query          string `json:"query" jsonschema:"search query to find tables, columns, or database objects"`
+	ConnectionName string `json:"connection_name,omitempty"`
+}
+
+type searchResultItem struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+type searchOutput struct {
+	Results []searchResultItem `json:"results"`
+}
+
+type fetchInput struct {
+	ID             string `json:"id" jsonschema:"object ID in format schema.table or schema.table.column"`
+	ConnectionName string `json:"connection_name,omitempty"`
+}
+
+type fetchOutput struct {
+	ID       string            `json:"id"`
+	Title    string            `json:"title"`
+	Text     string            `json:"text"`
+	URL      string            `json:"url"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 func (a *App) listConnections(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listConnectionsOutput, error) {
@@ -276,6 +319,199 @@ func (a *App) refreshSchemaCache(ctx context.Context, req *mcp.CallToolRequest, 
 	err = a.store.RefreshSchemaCache(connection)
 	a.audit(p, connection, "refresh_schema_cache", "", nil, err == nil, 0, start, err)
 	return nil, refreshCacheOutput{ConnectionName: connection, Refreshed: err == nil}, err
+}
+
+func (a *App) search(ctx context.Context, req *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
+	start := time.Now()
+	p, connection, err := a.authorize(req, in.ConnectionName, "read")
+	if err != nil {
+		return nil, searchOutput{}, err
+	}
+
+	query := strings.ToLower(strings.TrimSpace(in.Query))
+	if query == "" {
+		return nil, searchOutput{Results: []searchResultItem{}}, nil
+	}
+
+	cfg, ok := a.store.ConnectionConfig(connection)
+	if !ok {
+		return nil, searchOutput{}, fmt.Errorf("unknown connection: %s", connection)
+	}
+
+	var results []searchResultItem
+	seen := map[string]bool{}
+
+	for _, schema := range cfg.Schemas {
+		if schema == "*" {
+			schemas, err := a.store.ListSchemas(ctx, connection)
+			if err != nil {
+				continue
+			}
+			for _, s := range schemas {
+				a.searchInSchema(ctx, connection, s, query, seen, &results)
+			}
+		} else {
+			a.searchInSchema(ctx, connection, schema, query, seen, &results)
+		}
+	}
+
+	a.audit(p, connection, "search", "", nil, true, int64(len(results)), start, nil)
+	return nil, searchOutput{Results: results}, nil
+}
+
+func (a *App) searchInSchema(ctx context.Context, connection, schema, query string, seen map[string]bool, results *[]searchResultItem) {
+	tables, err := a.store.ListTables(ctx, connection, schema)
+	if err != nil {
+		return
+	}
+
+	for _, table := range tables {
+		tableID := schema + "." + table.Name
+		title := table.Name
+
+		if strings.Contains(strings.ToLower(table.Name), query) || strings.Contains(strings.ToLower(schema), query) {
+			if !seen[tableID] {
+				seen[tableID] = true
+				*results = append(*results, searchResultItem{
+					ID:    tableID,
+					Title: title,
+					URL:   fmt.Sprintf("postgres://%s/%s/%s", connection, schema, table.Name),
+				})
+			}
+		}
+
+		desc, err := a.store.DescribeTable(ctx, connection, schema, table.Name)
+		if err != nil {
+			continue
+		}
+
+		for _, col := range desc.Columns {
+			colID := tableID + "." + col.Name
+			if strings.Contains(strings.ToLower(col.Name), query) {
+				if !seen[colID] {
+					seen[colID] = true
+					*results = append(*results, searchResultItem{
+						ID:    colID,
+						Title: table.Name + "." + col.Name,
+						URL:   fmt.Sprintf("postgres://%s/%s/%s#%s", connection, schema, table.Name, col.Name),
+					})
+				}
+			}
+		}
+	}
+}
+
+func (a *App) fetch(ctx context.Context, req *mcp.CallToolRequest, in fetchInput) (*mcp.CallToolResult, fetchOutput, error) {
+	start := time.Now()
+	p, connection, err := a.authorize(req, in.ConnectionName, "read")
+	if err != nil {
+		return nil, fetchOutput{}, err
+	}
+
+	parts := strings.Split(in.ID, ".")
+	if len(parts) < 2 || len(parts) > 3 {
+		return nil, fetchOutput{}, fmt.Errorf("invalid ID format: expected schema.table or schema.table.column, got: %s", in.ID)
+	}
+
+	schema := parts[0]
+	table := parts[1]
+
+	cfg, ok := a.store.ConnectionConfig(connection)
+	if !ok {
+		return nil, fetchOutput{}, fmt.Errorf("unknown connection: %s", connection)
+	}
+
+	if !cfg.SchemaAllowed(schema) {
+		return nil, fetchOutput{}, fmt.Errorf("schema not allowed: %s", schema)
+	}
+
+	desc, err := a.store.DescribeTable(ctx, connection, schema, table)
+	if err != nil {
+		return nil, fetchOutput{}, err
+	}
+
+	var text strings.Builder
+	text.WriteString(fmt.Sprintf("Table: %s.%s\n\n", schema, table))
+
+	text.WriteString("Columns:\n")
+	for _, col := range desc.Columns {
+		pk := ""
+		if col.IsPrimaryKey {
+			pk = " [PRIMARY KEY]"
+		}
+		nullable := ""
+		if !col.Nullable {
+			nullable = " NOT NULL"
+		}
+		defaultVal := ""
+		if col.Default != nil {
+			defaultVal = " DEFAULT " + *col.Default
+		}
+		text.WriteString(fmt.Sprintf("  - %s %s%s%s%s\n", col.Name, col.Type, nullable, defaultVal, pk))
+	}
+
+	if len(desc.PrimaryKey) > 0 {
+		text.WriteString(fmt.Sprintf("\nPrimary Key: %s\n", strings.Join(desc.PrimaryKey, ", ")))
+	}
+
+	if len(desc.ForeignKeys) > 0 {
+		text.WriteString("\nForeign Keys:\n")
+		for _, fk := range desc.ForeignKeys {
+			text.WriteString(fmt.Sprintf("  - %s -> %s.%s.%s\n", fk.Column, fk.ForeignSchema, fk.ForeignTable, fk.ForeignColumn))
+		}
+	}
+
+	if len(desc.Indexes) > 0 {
+		text.WriteString("\nIndexes:\n")
+		for _, idx := range desc.Indexes {
+			unique := ""
+			if idx.Unique {
+				unique = " [UNIQUE]"
+			}
+			text.WriteString(fmt.Sprintf("  - %s%s: %s\n", idx.Name, unique, strings.Join(idx.Columns, ", ")))
+		}
+	}
+
+	output := fetchOutput{
+		ID:    in.ID,
+		Title: schema + "." + table,
+		Text:  text.String(),
+		URL:   fmt.Sprintf("postgres://%s/%s/%s", connection, schema, table),
+		Metadata: map[string]string{
+			"schema":    schema,
+			"table":     table,
+			"connection": connection,
+		},
+	}
+
+	if len(parts) == 3 {
+		colName := parts[2]
+		found := false
+		for _, col := range desc.Columns {
+			if col.Name == colName {
+				output.ID = in.ID
+				output.Title = schema + "." + table + "." + colName
+				output.Text = fmt.Sprintf("Column: %s\nType: %s\nNullable: %v\nPrimary Key: %v\n",
+					col.Name, col.Type, col.Nullable, col.IsPrimaryKey)
+				if col.Default != nil {
+					output.Text += fmt.Sprintf("Default: %s\n", *col.Default)
+				}
+				if col.Comment != nil {
+					output.Text += fmt.Sprintf("Comment: %s\n", *col.Comment)
+				}
+				output.URL = fmt.Sprintf("postgres://%s/%s/%s#%s", connection, schema, table, colName)
+				output.Metadata["column"] = colName
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fetchOutput{}, fmt.Errorf("column not found: %s", colName)
+		}
+	}
+
+	a.audit(p, connection, "fetch", "", []string{schema + "." + table}, true, 0, start, nil)
+	return nil, output, nil
 }
 
 func (a *App) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {

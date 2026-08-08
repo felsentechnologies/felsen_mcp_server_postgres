@@ -5,8 +5,8 @@ server:
   query_timeout: 30s
   session_timeout: 30m
   max_rows: 500
-  json_response: false
-  stateless: false
+  json_response: true
+  stateless: true
 
 auth:
   api_keys:
