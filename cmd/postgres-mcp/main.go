@@ -18,6 +18,7 @@ import (
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/authn"
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/config"
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/mcpserver"
+	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/oauth"
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/postgres"
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version"
 )
@@ -54,6 +55,16 @@ func main() {
 	if err != nil {
 		fatal("initialize auth", err)
 	}
+	oauthProvider, err := oauth.New(cfg.OAuth, authManager)
+	if err != nil {
+		fatal("initialize OAuth", err)
+	}
+	var authenticator authn.Authenticator = authManager
+	challenge := `Bearer realm="postgres-mcp"`
+	if oauthProvider != nil {
+		authenticator = authn.NewComposite(authManager, oauthProvider)
+		challenge = oauthProvider.Challenge()
+	}
 
 	auditor, err := audit.New(cfg.Audit, logger)
 	if err != nil {
@@ -67,10 +78,10 @@ func main() {
 	}
 	defer store.Close()
 
-	mcpHandler := mcpserver.New(cfg, store, authManager, auditor, logger)
+	mcpHandler := mcpserver.New(cfg, store, authenticator, auditor, logger)
 	mux := http.NewServeMux()
 	endpoint := cfg.Server.Endpoint
-	protected := authn.HTTPMiddlewareWithLogger(authManager, mcpHandler, logger)
+	protected := authn.HTTPMiddlewareWithLoggerAndChallenge(authenticator, mcpHandler, logger, challenge)
 	concurrency := make(chan struct{}, cfg.Server.MaxConcurrent)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -108,6 +119,11 @@ func main() {
 	}
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/readyz", readyHandler)
+	if oauthProvider != nil {
+		for _, path := range oauthProvider.Paths() {
+			mux.Handle(path, oauthProvider)
+		}
+	}
 
 	addr := net.JoinHostPort(cfg.Server.Host, fmt.Sprintf("%d", cfg.Server.Port))
 	server := &http.Server{

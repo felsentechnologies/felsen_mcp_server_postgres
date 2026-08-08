@@ -4,7 +4,7 @@ package version
 var (
 	// Version is kept in sync with the repository VERSION file and can be
 	// overridden by the release/container build with -ldflags -X.
-	Version = "0.3.0"
+	Version = "0.4.0"
 	Commit  = "unknown"
 	Date    = "unknown"
 )

@@ -16,12 +16,14 @@ ARG BUILD_DATE="unknown"
 ENV CGO_ENABLED=0
 RUN APP_VERSION="${VERSION_OVERRIDE:-$(tr -d '\r\n' < VERSION)}" && \
     go build -trimpath -ldflags="-s -w -X github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version.Version=${APP_VERSION} -X github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version.Commit=${BUILD_COMMIT} -X github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version.Date=${BUILD_DATE}" -o /out/postgres-mcp ./cmd/postgres-mcp
+RUN mkdir -p /out/oauth-data
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 
 COPY --from=build /out/postgres-mcp /app/postgres-mcp
+COPY --from=build --chown=65532:65532 /out/oauth-data /app/data
 COPY configs /app/configs
 COPY Docker/config.docker.yaml /app/Docker/config.docker.yaml
 

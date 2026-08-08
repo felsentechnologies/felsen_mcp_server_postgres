@@ -69,9 +69,17 @@ DATABASE_URL=postgres://user:password@postgres-host:5432/postgres?sslmode=disabl
 MCP_API_KEY=your-long-random-reader-token
 MCP_CITATION_SIGNING_KEY=your-long-random-key-at-least-32-characters
 MCP_PUBLIC_BASE_URL=https://mcp.example.com
+MCP_OAUTH_ENABLED=true
+MCP_OAUTH_ISSUER=https://mcp.example.com
+MCP_OAUTH_RESOURCE=https://mcp.example.com
+MCP_OAUTH_SIGNING_KEY=your-long-random-oauth-key-at-least-32-characters
+MCP_OAUTH_USERNAME=connector-login
+MCP_OAUTH_PASSWORD=your-long-random-oauth-password
+MCP_OAUTH_PRINCIPAL=reader
+MCP_OAUTH_CLIENT_ID=felsen-chatgpt
 HTTP_PORT=8080
 IMAGE_NAME=mcp-postgres
-IMAGE_TAG=v0.3.0
+IMAGE_TAG=v0.4.0
 ```
 
 For a versioned Swarm deployment, publish the image as `IMAGE_NAME:IMAGE_TAG`
@@ -87,9 +95,12 @@ Portainer. Leave `POSTGRES_MCP_CONFIG` unset, or set it to:
 ```
 
 The Docker config binds the server to `0.0.0.0`, which is required for the
-published Portainer/Docker port to reach the service.
+published Portainer/Docker port to reach the service. The Compose files also
+mount `oauth-client-data` at `/app/data`, so Dynamic Client Registration data
+survives container recreation when `MCP_OAUTH_CLIENT_STORE_PATH` uses the
+default `/app/data/oauth-clients.json`.
 
-Do not publish the Postgres port in production. The Swarm file keeps it on the internal overlay network and requires POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, MCP_API_KEY, MCP_CITATION_SIGNING_KEY, and MCP_PUBLIC_BASE_URL. Citation URLs are HMAC-signed and expire after 15 minutes.
+Do not publish the Postgres port in production. The Swarm file keeps it on the internal overlay network and requires POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, MCP_API_KEY, MCP_CITATION_SIGNING_KEY, and MCP_PUBLIC_BASE_URL. When OAuth is enabled, also provide MCP_OAUTH_SIGNING_KEY, MCP_OAUTH_USERNAME, and MCP_OAUTH_PASSWORD. Citation URLs are HMAC-signed and expire after 15 minutes.
 
 ## Stop Stack
 

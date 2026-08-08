@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -29,13 +30,13 @@ import (
 type App struct {
 	cfg     *config.Config
 	store   *postgres.Store
-	auth    *authn.Manager
+	auth    authn.Authenticator
 	auditor *audit.Auditor
 	logger  *slog.Logger
 	server  *mcp.Server
 }
 
-func New(cfg *config.Config, store *postgres.Store, auth *authn.Manager, auditor *audit.Auditor, logger *slog.Logger) http.Handler {
+func New(cfg *config.Config, store *postgres.Store, auth authn.Authenticator, auditor *audit.Auditor, logger *slog.Logger) http.Handler {
 	app := &App{cfg: cfg, store: store, auth: auth, auditor: auditor, logger: logger}
 	app.server = mcp.NewServer(&mcp.Implementation{Name: "postgres-mcp", Version: version.String()}, &mcp.ServerOptions{
 		Instructions: "Use search to discover database objects and fetch to retrieve their details. Read-only tools may be called without confirmation; execute_dml and execute_ddl are consequential and require explicit user approval.",
@@ -46,7 +47,7 @@ func New(cfg *config.Config, store *postgres.Store, auth *authn.Manager, auditor
 
 	mux := http.NewServeMux()
 
-	streamableHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	var streamableHandler http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return app.server
 	}, &mcp.StreamableHTTPOptions{
 		JSONResponse:   cfg.Server.JSONResponse,
@@ -54,6 +55,9 @@ func New(cfg *config.Config, store *postgres.Store, auth *authn.Manager, auditor
 		SessionTimeout: cfg.Server.SessionTimeoutDuration(),
 		Logger:         logger,
 	})
+	if cfg.Server.JSONResponse {
+		streamableHandler = withTopLevelToolSecuritySchemes(streamableHandler)
+	}
 
 	sseHandler := mcp.NewSSEHandler(func(*http.Request) *mcp.Server {
 		return app.server
@@ -102,19 +106,155 @@ func (a *App) registerTools() {
 	readOnly := true
 	openWorld := true
 	destructive := true
-	mcp.AddTool(a.server, &mcp.Tool{Name: "list_connections", Title: "List database connections", Description: "List named Postgres connections allowed for this token.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listConnections)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "list_schemas", Title: "List database schemas", Description: "List allowed schemas in a Postgres connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listSchemas)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "list_tables", Title: "List database tables", Description: "List tables and views for a schema.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listTables)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "describe_table", Title: "Describe a database table", Description: "Describe columns, primary key, foreign keys and indexes for a table.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.describeTable)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "sample_rows", Title: "Sample database rows", Description: "Return a limited, masked sample of table rows.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.sampleRows)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_sql", Title: "Validate SQL", Description: "Validate SQL against read-only or DML policies without executing it.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateSQL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_sql", Title: "Execute read-only SQL", Description: "Execute a validated SELECT query with configured row limits and masking.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, OpenWorldHint: &openWorld}}, a.executeSQL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_dml", Title: "Execute a database write", Description: "Execute INSERT, UPDATE or DELETE only when explicitly allowlisted and approved by the user.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDML)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Title: "Explain read-only SQL", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_ddl", Title: "Execute database DDL", Description: "Execute allowlisted CREATE, ALTER, DROP or TRUNCATE statements only when DDL is enabled and explicitly approved.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDDL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "refresh_schema_cache", Title: "Refresh schema cache", Description: "Clear cached schema descriptions for a connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.refreshSchemaCache)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "search", Title: "Search database objects", Description: "Search all database connections allowed for this token for tables, columns, and database objects matching a query. Each result ID is an opaque connection-scoped ID for fetch.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.search)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "fetch", Title: "Fetch a database object", Description: "Fetch detailed information about a database object by the opaque connection-scoped ID returned by search.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.fetch)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "list_connections", Title: "List database connections", Description: "List named Postgres connections allowed for this token.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listConnections)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "list_schemas", Title: "List database schemas", Description: "List allowed schemas in a Postgres connection.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listSchemas)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "list_tables", Title: "List database tables", Description: "List tables and views for a schema.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listTables)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "describe_table", Title: "Describe a database table", Description: "Describe columns, primary key, foreign keys and indexes for a table.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.describeTable)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "sample_rows", Title: "Sample database rows", Description: "Return a limited, masked sample of table rows.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.sampleRows)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_sql", Title: "Validate SQL", Description: "Validate SQL against read-only or DML policies without executing it.", Meta: a.toolSecurityMeta("read", "write", "ddl"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_sql", Title: "Execute read-only SQL", Description: "Execute a validated SELECT query with configured row limits and masking.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, OpenWorldHint: &openWorld}}, a.executeSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_dml", Title: "Execute a database write", Description: "Execute INSERT, UPDATE or DELETE only when explicitly allowlisted and approved by the user.", Meta: a.toolSecurityMeta("write"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDML)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Title: "Explain read-only SQL", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_ddl", Title: "Execute database DDL", Description: "Execute allowlisted CREATE, ALTER, DROP or TRUNCATE statements only when DDL is enabled and explicitly approved.", Meta: a.toolSecurityMeta("ddl"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDDL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "refresh_schema_cache", Title: "Refresh schema cache", Description: "Clear cached schema descriptions for a connection.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.refreshSchemaCache)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "search", Title: "Search database objects", Description: "Search all database connections allowed for this token for tables, columns, and database objects matching a query. Each result ID is an opaque connection-scoped ID for fetch.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.search)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "fetch", Title: "Fetch a database object", Description: "Fetch detailed information about a database object by the opaque connection-scoped ID returned by search.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.fetch)
+}
+
+func (a *App) toolSecurityMeta(scopes ...string) mcp.Meta {
+	if a.cfg == nil || !a.cfg.OAuth.Enabled {
+		return nil
+	}
+	// Do not advertise action-level scopes that the configured OAuth
+	// principal cannot ever receive. ChatGPT then falls back to the default
+	// scopes instead of requesting write/DDL access from a read-only connector.
+	if len(a.cfg.Auth.APIKeys) > 0 {
+		principalName := a.cfg.OAuth.Principal
+		if principalName == "" {
+			principalName = a.cfg.Auth.APIKeys[0].Name
+		}
+		var principal *config.APIKeyConfig
+		for i := range a.cfg.Auth.APIKeys {
+			if a.cfg.Auth.APIKeys[i].Name == principalName {
+				principal = &a.cfg.Auth.APIKeys[i]
+				break
+			}
+		}
+		if principal == nil {
+			return nil
+		}
+		for _, scope := range scopes {
+			if !containsScope(principal.Scopes, scope) && !containsScope(principal.Scopes, "admin") {
+				return nil
+			}
+		}
+	}
+	return mcp.Meta{
+		"securitySchemes": []map[string]any{{
+			"type":   "oauth2",
+			"scopes": scopes,
+		}},
+	}
+}
+
+func containsScope(scopes []string, wanted string) bool {
+	for _, scope := range scopes {
+		if strings.EqualFold(strings.TrimSpace(scope), wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+type bufferedResponseWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (w *bufferedResponseWriter) Header() http.Header { return w.header }
+
+func (w *bufferedResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *bufferedResponseWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(data)
+}
+
+func withTopLevelToolSecuritySchemes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buffered := &bufferedResponseWriter{header: make(http.Header)}
+		next.ServeHTTP(buffered, r)
+		body := buffered.body.Bytes()
+		transformed := addTopLevelToolSecuritySchemes(body, buffered.header.Get("Content-Type"))
+		for key, values := range buffered.header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		if transformed != nil {
+			w.Header().Del("Content-Length")
+			body = transformed
+		}
+		status := buffered.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	})
+}
+
+func addTopLevelToolSecuritySchemes(body []byte, contentType string) []byte {
+	if !strings.Contains(strings.ToLower(contentType), "application/json") {
+		return nil
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	result, ok := envelope["result"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	tools, ok := result["tools"].([]any)
+	if !ok {
+		return nil
+	}
+	changed := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := tool["securitySchemes"]; exists {
+			continue
+		}
+		meta, ok := tool["_meta"].(map[string]any)
+		if !ok {
+			continue
+		}
+		security, ok := meta["securitySchemes"]
+		if !ok {
+			continue
+		}
+		tool["securitySchemes"] = security
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	transformed, err := json.Marshal(envelope)
+	if err != nil {
+		return nil
+	}
+	return append(transformed, '\n')
 }
 
 type connectionInput struct {
@@ -649,7 +789,7 @@ func (a *App) sourceHTTPHandler(w http.ResponseWriter, r *http.Request) {
 		p, authenticated = a.auth.AuthenticateHeader(r.Header.Get("Authorization"))
 	}
 	if !signed && (!authenticated || !p.HasScope("read")) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="postgres-mcp"`)
+		w.Header().Set("WWW-Authenticate", a.authChallenge())
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -798,6 +938,9 @@ func (a *App) principal(req *mcp.CallToolRequest) (authn.Principal, error) {
 	if req == nil || req.GetExtra() == nil {
 		return authn.Principal{}, errors.New("missing request metadata")
 	}
+	if a.auth == nil {
+		return authn.Principal{}, errors.New("unauthorized")
+	}
 	p, ok := a.auth.AuthenticateHeader(req.GetExtra().Header.Get("Authorization"))
 	if !ok {
 		return authn.Principal{}, errors.New("unauthorized")
@@ -809,11 +952,21 @@ func (a *App) resourcePrincipal(req *mcp.ReadResourceRequest) (authn.Principal, 
 	if req == nil || req.GetExtra() == nil {
 		return authn.Principal{}, errors.New("missing request metadata")
 	}
+	if a.auth == nil {
+		return authn.Principal{}, errors.New("unauthorized")
+	}
 	p, ok := a.auth.AuthenticateHeader(req.GetExtra().Header.Get("Authorization"))
 	if !ok {
 		return authn.Principal{}, errors.New("unauthorized")
 	}
 	return p, nil
+}
+
+func (a *App) authChallenge() string {
+	if a.cfg != nil && a.cfg.OAuth.Enabled && strings.TrimSpace(a.cfg.OAuth.Issuer) != "" {
+		return fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, strings.TrimRight(a.cfg.OAuth.Issuer, "/"))
+	}
+	return `Bearer realm="postgres-mcp"`
 }
 
 func (a *App) resolveConnection(requested string) (string, error) {

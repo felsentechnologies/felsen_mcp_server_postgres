@@ -6,6 +6,15 @@ param(
     [string]$McpApiKey = "",
     [string]$CitationSigningKey = "",
     [string]$PublicBaseUrl = "",
+    [bool]$OAuthEnabled = $false,
+    [string]$OAuthIssuer = "",
+    [string]$OAuthResource = "",
+    [string]$OAuthSigningKey = "",
+    [string]$OAuthUsername = "",
+    [string]$OAuthPassword = "",
+    [string]$OAuthPrincipal = "",
+    [string]$OAuthClientId = "",
+    [string]$OAuthClientStorePath = "",
     [int]$PostgresPort = 5432,
     [string]$PostgresDb = "",
     [string]$PostgresUser = "",
@@ -39,6 +48,15 @@ $ImageTagWasProvided = $PSBoundParameters.ContainsKey("ImageTag")
 $DatabaseUrlWasProvided = -not [string]::IsNullOrWhiteSpace($DatabaseUrl)
 $McpApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpApiKey)
 $CitationSigningKeyWasProvided = -not [string]::IsNullOrWhiteSpace($CitationSigningKey)
+$OAuthEnabledWasProvided = $PSBoundParameters.ContainsKey("OAuthEnabled")
+$OAuthIssuerWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthIssuer)
+$OAuthResourceWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthResource)
+$OAuthSigningKeyWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthSigningKey)
+$OAuthUsernameWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthUsername)
+$OAuthPasswordWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthPassword)
+$OAuthPrincipalWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthPrincipal)
+$OAuthClientIdWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthClientId)
+$OAuthClientStorePathWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthClientStorePath)
 
 function Write-Title {
     param([string]$Text)
@@ -227,6 +245,60 @@ function Sync-DevEnv {
         }
     }
 
+    if (-not $OAuthEnabledWasProvided -and $values.ContainsKey("MCP_OAUTH_ENABLED")) {
+        $parsedOAuthEnabled = $false
+        if ([bool]::TryParse($values["MCP_OAUTH_ENABLED"], [ref]$parsedOAuthEnabled)) {
+            $script:OAuthEnabled = $parsedOAuthEnabled
+        }
+    }
+    if (-not $OAuthIssuerWasProvided -and $values.ContainsKey("MCP_OAUTH_ISSUER")) {
+        $script:OAuthIssuer = $values["MCP_OAUTH_ISSUER"]
+    }
+    if (-not $OAuthResourceWasProvided -and $values.ContainsKey("MCP_OAUTH_RESOURCE")) {
+        $script:OAuthResource = $values["MCP_OAUTH_RESOURCE"]
+    }
+    if (-not $OAuthSigningKeyWasProvided -and $values.ContainsKey("MCP_OAUTH_SIGNING_KEY")) {
+        $script:OAuthSigningKey = $values["MCP_OAUTH_SIGNING_KEY"]
+    }
+    if (-not $OAuthUsernameWasProvided -and $values.ContainsKey("MCP_OAUTH_USERNAME")) {
+        $script:OAuthUsername = $values["MCP_OAUTH_USERNAME"]
+    }
+    if (-not $OAuthPasswordWasProvided -and $values.ContainsKey("MCP_OAUTH_PASSWORD")) {
+        $script:OAuthPassword = $values["MCP_OAUTH_PASSWORD"]
+    }
+    if (-not $OAuthPrincipalWasProvided -and $values.ContainsKey("MCP_OAUTH_PRINCIPAL")) {
+        $script:OAuthPrincipal = $values["MCP_OAUTH_PRINCIPAL"]
+    }
+    if (-not $OAuthClientIdWasProvided -and $values.ContainsKey("MCP_OAUTH_CLIENT_ID")) {
+        $script:OAuthClientId = $values["MCP_OAUTH_CLIENT_ID"]
+    }
+    if (-not $OAuthClientStorePathWasProvided -and $values.ContainsKey("MCP_OAUTH_CLIENT_STORE_PATH")) {
+        $script:OAuthClientStorePath = $values["MCP_OAUTH_CLIENT_STORE_PATH"]
+    }
+    if ([string]::IsNullOrWhiteSpace($OAuthIssuer)) {
+        $script:OAuthIssuer = $PublicBaseUrl
+    }
+    if ([string]::IsNullOrWhiteSpace($OAuthResource)) {
+        $script:OAuthResource = $PublicBaseUrl
+    }
+    if ([string]::IsNullOrWhiteSpace($OAuthPrincipal)) {
+        $script:OAuthPrincipal = "reader"
+    }
+    if ([string]::IsNullOrWhiteSpace($OAuthClientId)) {
+        $script:OAuthClientId = "felsen-chatgpt"
+    }
+    if ($OAuthEnabled) {
+        if ([string]::IsNullOrWhiteSpace($OAuthSigningKey) -or $OAuthSigningKey -match "(?i)^(change-me|replace-with|your-)") {
+            $script:OAuthSigningKey = New-DevSecret 32
+        }
+        if ([string]::IsNullOrWhiteSpace($OAuthUsername) -or $OAuthUsername -match "(?i)^(change-me|replace-with|your-)") {
+            $script:OAuthUsername = "chatgpt"
+        }
+        if ([string]::IsNullOrWhiteSpace($OAuthPassword) -or $OAuthPassword -match "(?i)^(change-me|replace-with|your-|secret|password)$") {
+            $script:OAuthPassword = New-DevSecret 32
+        }
+    }
+
     if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
         if ($values.ContainsKey("POSTGRES_MCP_CONFIG") -and -not [string]::IsNullOrWhiteSpace($values["POSTGRES_MCP_CONFIG"])) {
             $script:ConfigPath = $values["POSTGRES_MCP_CONFIG"]
@@ -253,6 +325,15 @@ function Save-EnvFile {
     $lines += "MCP_API_KEY=$McpApiKey"
     $lines += "MCP_CITATION_SIGNING_KEY=$CitationSigningKey"
     $lines += "MCP_PUBLIC_BASE_URL=$PublicBaseUrl"
+    $lines += "MCP_OAUTH_ENABLED=$($OAuthEnabled.ToString().ToLowerInvariant())"
+    $lines += "MCP_OAUTH_ISSUER=$OAuthIssuer"
+    $lines += "MCP_OAUTH_RESOURCE=$OAuthResource"
+    $lines += "MCP_OAUTH_SIGNING_KEY=$OAuthSigningKey"
+    $lines += "MCP_OAUTH_USERNAME=$OAuthUsername"
+    $lines += "MCP_OAUTH_PASSWORD=$OAuthPassword"
+    $lines += "MCP_OAUTH_PRINCIPAL=$OAuthPrincipal"
+    $lines += "MCP_OAUTH_CLIENT_ID=$OAuthClientId"
+    $lines += "MCP_OAUTH_CLIENT_STORE_PATH=$OAuthClientStorePath"
     $lines += "MCP_VERSION=$(Get-ProjectVersion)"
     $lines += "HTTP_PORT=$HostPort"
     $lines += "MCP_PORT=$HostPort"
@@ -294,6 +375,36 @@ function Sync-Env {
     }
     if ([string]::IsNullOrWhiteSpace($CitationSigningKey) -or $CitationSigningKey.Length -lt 32 -or $CitationSigningKey -match "(?i)(change-me|replace-with|your-)" ) {
         throw "MCP_CITATION_SIGNING_KEY is required, must have at least 32 characters, and cannot be a placeholder."
+    }
+    if ($OAuthEnabled) {
+        foreach ($item in @(
+            @{ Name = "MCP_OAUTH_ISSUER"; Value = $OAuthIssuer },
+            @{ Name = "MCP_OAUTH_RESOURCE"; Value = $OAuthResource },
+            @{ Name = "MCP_OAUTH_SIGNING_KEY"; Value = $OAuthSigningKey },
+            @{ Name = "MCP_OAUTH_USERNAME"; Value = $OAuthUsername },
+            @{ Name = "MCP_OAUTH_PASSWORD"; Value = $OAuthPassword },
+            @{ Name = "MCP_OAUTH_PRINCIPAL"; Value = $OAuthPrincipal },
+            @{ Name = "MCP_OAUTH_CLIENT_ID"; Value = $OAuthClientId }
+        )) {
+            if ([string]::IsNullOrWhiteSpace($item.Value)) {
+                throw "$($item.Name) is required when OAuth is enabled."
+            }
+        }
+        foreach ($urlValue in @($OAuthIssuer, $OAuthResource)) {
+            $parsedUrl = $null
+            if (-not [System.Uri]::TryCreate($urlValue, [System.UriKind]::Absolute, [ref]$parsedUrl) -or $parsedUrl.Scheme -notin @("http", "https") -or [string]::IsNullOrWhiteSpace($parsedUrl.Host)) {
+                throw "OAuth issuer/resource must be absolute HTTP(S) origins."
+            }
+            if ($parsedUrl.AbsolutePath -ne "/" -or $parsedUrl.Query -ne "" -or $parsedUrl.Fragment -ne "") {
+                throw "OAuth issuer/resource cannot contain a path, query, or fragment."
+            }
+        }
+        if ($OAuthSigningKey.Length -lt 32 -or $OAuthSigningKey -match "(?i)(change-me|replace-with|your-|secret|password)") {
+            throw "MCP_OAUTH_SIGNING_KEY must have at least 32 characters and cannot be a placeholder."
+        }
+        if ($OAuthPassword.Length -lt 12 -or $OAuthPassword -match "(?i)^(secret|password)$") {
+            throw "MCP_OAUTH_PASSWORD must have at least 12 characters and cannot be a placeholder."
+        }
     }
     [void](Get-ProjectVersion)
 }
@@ -349,6 +460,15 @@ function Set-ComposeEnvironment {
     $env:MCP_API_KEY = $McpApiKey
     $env:MCP_CITATION_SIGNING_KEY = $CitationSigningKey
     $env:MCP_PUBLIC_BASE_URL = $PublicBaseUrl
+    $env:MCP_OAUTH_ENABLED = $OAuthEnabled.ToString().ToLowerInvariant()
+    $env:MCP_OAUTH_ISSUER = $OAuthIssuer
+    $env:MCP_OAUTH_RESOURCE = $OAuthResource
+    $env:MCP_OAUTH_SIGNING_KEY = $OAuthSigningKey
+    $env:MCP_OAUTH_USERNAME = $OAuthUsername
+    $env:MCP_OAUTH_PASSWORD = $OAuthPassword
+    $env:MCP_OAUTH_PRINCIPAL = $OAuthPrincipal
+    $env:MCP_OAUTH_CLIENT_ID = $OAuthClientId
+    $env:MCP_OAUTH_CLIENT_STORE_PATH = $OAuthClientStorePath
     $env:MCP_VERSION = Get-ProjectVersion
     $env:MCP_COMMIT = Get-GitCommit
     $env:MCP_BUILD_DATE = Get-BuildDate
@@ -685,6 +805,35 @@ function Test-MCPExecuteDdl {
     }
 }
 
+function Test-OAuthDiscovery {
+    Write-Title "Teste descoberta OAuth"
+    Sync-Env
+    $baseUrl = $PublicBaseUrl.TrimEnd("/")
+    foreach ($path in @("/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server")) {
+        try {
+            $result = Invoke-RestMethod -Uri ($baseUrl + $path) -Method Get
+            Write-Host "$path OK" -ForegroundColor Green
+            $result | ConvertTo-Json -Depth 6
+        }
+        catch {
+            Write-Host "Falha ao chamar $baseUrl$path" -ForegroundColor Red
+            Write-Host $_.Exception.Message
+        }
+    }
+    try {
+        $challenge = Invoke-WebRequest -Uri ($baseUrl + "/mcp") -Method Get
+        Write-Host "MCP challenge: $($challenge.Headers['WWW-Authenticate'])" -ForegroundColor Green
+    }
+    catch {
+        if ($_.Exception.Response) {
+            Write-Host "MCP challenge: $($_.Exception.Response.Headers['WWW-Authenticate'])" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Falha ao verificar challenge MCP: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+}
+
 function Write-StackInfo {
     Sync-Env
     Write-Host ""
@@ -695,6 +844,10 @@ function Write-StackInfo {
     Write-Host "MCP Endpoint: http://localhost:$HostPort/mcp" -ForegroundColor Green
     Write-Host "Health:       http://localhost:$HostPort/healthz" -ForegroundColor Green
     Write-Host "API Key:      configured" -ForegroundColor Yellow
+    if ($OAuthEnabled) {
+        Write-Host "OAuth Auth:   $($PublicBaseUrl.TrimEnd('/'))/oauth/authorize" -ForegroundColor Green
+        Write-Host "OAuth Token:  $($PublicBaseUrl.TrimEnd('/'))/oauth/token" -ForegroundColor Green
+    }
     Write-Host ""
     Write-Host "Use este token como Authorization: Bearer <token>" -ForegroundColor Yellow
 }
@@ -714,6 +867,7 @@ function Show-Menu {
     Write-Host "Porta MCP:     $HostPort"
     Write-Host "Porta PG:      $PostgresPort"
     Write-Host "API Key:       $(if ($McpApiKey) { 'configurado' } else { 'sera gerada' })"
+    Write-Host "OAuth:         $(if ($OAuthEnabled) { 'habilitado' } else { 'desabilitado' })"
     Write-Host ""
     Write-Host "1. Buildar imagem Docker"
     Write-Host "2. Buildar stack"
@@ -734,6 +888,7 @@ function Show-Menu {
     Write-Host "17. Salvar .env"
     Write-Host "18. Ver versao e metadata de build"
     Write-Host "19. Criar tag de release"
+    Write-Host "20. Testar descoberta OAuth"
     Write-Host "0. Sair"
     Write-Host ""
 }
@@ -766,6 +921,7 @@ do {
                 $pushTag = Read-Host "Enviar a tag para origin agora? (s/N)"
                 New-ProjectTag -Push:($pushTag -match "(?i)^(s|sim|y|yes)$")
             }
+            "20" { Test-OAuthDiscovery }
             "0" { break }
             default { Write-Host "Opcao invalida." -ForegroundColor Yellow }
         }

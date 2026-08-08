@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ const (
 type Config struct {
 	Server      ServerConfig                `json:"server" yaml:"server"`
 	Auth        AuthConfig                  `json:"auth" yaml:"auth"`
+	OAuth       OAuthConfig                 `json:"oauth" yaml:"oauth"`
 	Connections map[string]ConnectionConfig `json:"connections" yaml:"connections"`
 	Audit       AuditConfig                 `json:"audit" yaml:"audit"`
 }
@@ -60,6 +62,32 @@ type ServerConfig struct {
 
 type AuthConfig struct {
 	APIKeys []APIKeyConfig `json:"api_keys" yaml:"api_keys"`
+}
+
+// OAuthConfig configures the embedded OAuth 2.1 authorization server used by
+// ChatGPT and other MCP clients. The embedded provider is intentionally small
+// and is suitable as a bootstrap identity provider; organizations can later
+// point the MCP server at an external IdP without changing the MCP tools.
+type OAuthConfig struct {
+	Enabled              bool     `json:"enabled" yaml:"enabled"`
+	Issuer               string   `json:"issuer" yaml:"issuer"`
+	Resource             string   `json:"resource" yaml:"resource"`
+	SigningKey           string   `json:"signing_key" yaml:"signing_key"`
+	SigningKeyEnv        string   `json:"signing_key_env" yaml:"signing_key_env"`
+	Username             string   `json:"username" yaml:"username"`
+	UsernameEnv          string   `json:"username_env" yaml:"username_env"`
+	Password             string   `json:"password" yaml:"password"`
+	PasswordEnv          string   `json:"password_env" yaml:"password_env"`
+	Principal            string   `json:"principal" yaml:"principal"`
+	ClientID             string   `json:"client_id" yaml:"client_id"`
+	RedirectURIs         []string `json:"redirect_uris" yaml:"redirect_uris"`
+	ClientStorePath      string   `json:"client_store_path" yaml:"client_store_path"`
+	ClientStorePathEnv   string   `json:"client_store_path_env" yaml:"client_store_path_env"`
+	DefaultScopes        []string `json:"default_scopes" yaml:"default_scopes"`
+	BaseScopes           []string `json:"base_scopes" yaml:"base_scopes"`
+	AccessTokenTTL       string   `json:"access_token_ttl" yaml:"access_token_ttl"`
+	RefreshTokenTTL      string   `json:"refresh_token_ttl" yaml:"refresh_token_ttl"`
+	AuthorizationCodeTTL string   `json:"authorization_code_ttl" yaml:"authorization_code_ttl"`
 }
 
 type APIKeyConfig struct {
@@ -251,6 +279,7 @@ func applyDefaults(cfg *Config) {
 	if cfg.Server.CitationSigningKey == "" && cfg.Server.CitationSigningKeyEnv != "" {
 		cfg.Server.CitationSigningKey = os.Getenv(cfg.Server.CitationSigningKeyEnv)
 	}
+	applyOAuthDefaults(cfg)
 	for name, c := range cfg.Connections {
 		if c.DSN == "" && c.DSNEnv != "" {
 			c.DSN = os.Getenv(c.DSNEnv)
@@ -272,6 +301,87 @@ func applyDefaults(cfg *Config) {
 		}
 		cfg.Connections[name] = c
 	}
+}
+
+func applyOAuthDefaults(cfg *Config) {
+	oauth := &cfg.OAuth
+	if value, ok := os.LookupEnv("MCP_OAUTH_ENABLED"); ok && strings.TrimSpace(value) != "" {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+			oauth.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_ISSUER")); value != "" {
+		oauth.Issuer = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_RESOURCE")); value != "" {
+		oauth.Resource = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_SIGNING_KEY")); value != "" {
+		oauth.SigningKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_USERNAME")); value != "" {
+		oauth.Username = value
+	}
+	if value := os.Getenv("MCP_OAUTH_PASSWORD"); value != "" {
+		oauth.Password = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_PRINCIPAL")); value != "" {
+		oauth.Principal = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_CLIENT_ID")); value != "" {
+		oauth.ClientID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_CLIENT_STORE_PATH")); value != "" {
+		oauth.ClientStorePath = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_DEFAULT_SCOPES")); value != "" {
+		oauth.DefaultScopes = splitConfigList(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("MCP_OAUTH_BASE_SCOPES")); value != "" {
+		oauth.BaseScopes = splitConfigList(value)
+	}
+
+	if oauth.SigningKey == "" && oauth.SigningKeyEnv != "" {
+		oauth.SigningKey = os.Getenv(oauth.SigningKeyEnv)
+	}
+	if oauth.Username == "" && oauth.UsernameEnv != "" {
+		oauth.Username = os.Getenv(oauth.UsernameEnv)
+	}
+	if oauth.Password == "" && oauth.PasswordEnv != "" {
+		oauth.Password = os.Getenv(oauth.PasswordEnv)
+	}
+	if oauth.ClientStorePath == "" && oauth.ClientStorePathEnv != "" {
+		oauth.ClientStorePath = os.Getenv(oauth.ClientStorePathEnv)
+	}
+	if oauth.Issuer == "" {
+		oauth.Issuer = cfg.Server.PublicBaseURL
+	}
+	if oauth.Resource == "" {
+		oauth.Resource = cfg.Server.PublicBaseURL
+	}
+	if oauth.Principal == "" && len(cfg.Auth.APIKeys) > 0 {
+		oauth.Principal = cfg.Auth.APIKeys[0].Name
+	}
+	if oauth.ClientID == "" {
+		oauth.ClientID = "felsen-chatgpt"
+	}
+	if len(oauth.DefaultScopes) == 0 {
+		oauth.DefaultScopes = []string{"read"}
+	}
+	if len(oauth.BaseScopes) == 0 {
+		oauth.BaseScopes = []string{"read"}
+	}
+	if oauth.AccessTokenTTL == "" {
+		oauth.AccessTokenTTL = "1h"
+	}
+	if oauth.RefreshTokenTTL == "" {
+		oauth.RefreshTokenTTL = "720h"
+	}
+	if oauth.AuthorizationCodeTTL == "" {
+		oauth.AuthorizationCodeTTL = "5m"
+	}
+	oauth.DefaultScopes = normalizeConfigList(oauth.DefaultScopes)
+	oauth.BaseScopes = normalizeConfigList(oauth.BaseScopes)
 }
 
 func (cfg *Config) Validate() error {
@@ -335,6 +445,81 @@ func (cfg *Config) Validate() error {
 	}
 	if len(cfg.Auth.APIKeys) == 0 {
 		return errors.New("at least one auth.api_keys entry or MCP_API_KEY is required")
+	}
+	if cfg.OAuth.Enabled {
+		if err := validateOAuthOrigin("oauth.issuer", cfg.OAuth.Issuer); err != nil {
+			return err
+		}
+		if err := validateOAuthOrigin("oauth.resource", cfg.OAuth.Resource); err != nil {
+			return err
+		}
+		if !sameOrigin(cfg.Server.PublicBaseURL, cfg.OAuth.Issuer) || !sameOrigin(cfg.Server.PublicBaseURL, cfg.OAuth.Resource) {
+			return errors.New("embedded OAuth issuer and resource must use the same public origin as server.public_base_url")
+		}
+		if strings.TrimSpace(cfg.OAuth.SigningKey) == "" {
+			if cfg.OAuth.SigningKeyEnv != "" {
+				return fmt.Errorf("oauth.signing_key_env %q is not set", cfg.OAuth.SigningKeyEnv)
+			}
+			return errors.New("oauth.signing_key is required when OAuth is enabled")
+		}
+		if insecureSecret(cfg.OAuth.SigningKey) {
+			return errors.New("oauth.signing_key uses a known insecure placeholder token")
+		}
+		if len(cfg.OAuth.SigningKey) < 32 {
+			return errors.New("oauth.signing_key must contain at least 32 characters")
+		}
+		if strings.TrimSpace(cfg.OAuth.Username) == "" {
+			return errors.New("oauth.username is required when OAuth is enabled")
+		}
+		if strings.TrimSpace(cfg.OAuth.Password) == "" {
+			return errors.New("oauth.password is required when OAuth is enabled")
+		}
+		if insecureSecret(cfg.OAuth.Password) {
+			return errors.New("oauth.password uses a known insecure placeholder token")
+		}
+		if strings.TrimSpace(cfg.OAuth.ClientID) == "" || strings.ContainsAny(cfg.OAuth.ClientID, " \t\r\n") {
+			return errors.New("oauth.client_id must be non-empty and contain no whitespace")
+		}
+		principalNames := map[string]APIKeyConfig{}
+		for _, key := range cfg.Auth.APIKeys {
+			principalNames[key.Name] = key
+		}
+		principal, ok := principalNames[cfg.OAuth.Principal]
+		if !ok {
+			return fmt.Errorf("oauth.principal %q does not match an auth api key", cfg.OAuth.Principal)
+		}
+		for _, redirectURI := range cfg.OAuth.RedirectURIs {
+			if err := validateOAuthRedirectURI(redirectURI); err != nil {
+				return fmt.Errorf("oauth.redirect_uris: %w", err)
+			}
+		}
+		knownScopes := map[string]bool{"read": true, "write": true, "ddl": true, "admin": true}
+		for field, scopes := range map[string][]string{
+			"default_scopes": cfg.OAuth.DefaultScopes,
+			"base_scopes":    cfg.OAuth.BaseScopes,
+		} {
+			for _, scope := range scopes {
+				if !knownScopes[scope] {
+					return fmt.Errorf("oauth.%s contains unsupported scope %q", field, scope)
+				}
+				if !containsFold(principal.Scopes, scope) && !containsFold(principal.Scopes, "admin") {
+					return fmt.Errorf("oauth.%s requests scope %q not granted to principal %q", field, scope, principal.Name)
+				}
+			}
+		}
+		for field, value := range map[string]string{
+			"access_token_ttl":       cfg.OAuth.AccessTokenTTL,
+			"refresh_token_ttl":      cfg.OAuth.RefreshTokenTTL,
+			"authorization_code_ttl": cfg.OAuth.AuthorizationCodeTTL,
+		} {
+			duration, err := time.ParseDuration(value)
+			if err != nil || duration <= 0 {
+				if err == nil {
+					err = errors.New("must be positive")
+				}
+				return fmt.Errorf("oauth %s: %w", field, err)
+			}
+		}
 	}
 	knownScopes := map[string]bool{"read": true, "write": true, "ddl": true, "admin": true}
 	keyNames := map[string]bool{}
@@ -515,6 +700,72 @@ func (c ConnectionConfig) DMLAllowed(schema, table, operation string) bool {
 		}
 	}
 	return false
+}
+
+func validateOAuthOrigin(field, value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be an absolute http(s) origin without credentials, path, query, or fragment", field)
+	}
+	if strings.EqualFold(parsed.Hostname(), "0.0.0.0") || strings.EqualFold(parsed.Hostname(), "::") {
+		return fmt.Errorf("%s cannot point to a wildcard bind address", field)
+	}
+	return nil
+}
+
+func validateOAuthRedirectURI(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLocalHost(parsed.Hostname()))) {
+		return errors.New("redirect URI must be an absolute HTTPS URL (HTTP is allowed only for localhost) without credentials, query, or fragment")
+	}
+	return nil
+}
+
+func sameOrigin(left, right string) bool {
+	a, errA := url.Parse(strings.TrimSpace(left))
+	b, errB := url.Parse(strings.TrimSpace(right))
+	if errA != nil || errB != nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
+func isLocalHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasPrefix(host, "127.")
+}
+
+func containsFold(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitConfigList(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' ' })
+	return normalizeConfigList(parts)
+}
+
+func normalizeConfigList(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func matchesName(pattern, value string) bool {

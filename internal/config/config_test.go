@@ -8,6 +8,7 @@ import (
 
 func TestLoadYAMLConfig(t *testing.T) {
 	t.Setenv("MCP_PUBLIC_BASE_URL", "")
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
 	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte(`
@@ -55,6 +56,7 @@ connections:
 }
 
 func TestPublicBaseURLEnvironmentOverridesFile(t *testing.T) {
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
 	t.Setenv("MCP_PUBLIC_BASE_URL", "https://public.example.com")
 	t.Setenv("TEST_MCP_TOKEN", "test-token")
 	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
@@ -87,6 +89,7 @@ connections:
 
 func TestDockerConfigHasLocalPublicBaseFallback(t *testing.T) {
 	t.Setenv("MCP_PUBLIC_BASE_URL", "")
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@postgres:5432/mcp")
 	t.Setenv("MCP_API_KEY", "docker-config-test-reader-token")
 	t.Setenv("MCP_CITATION_SIGNING_KEY", "docker-config-test-citation-key-with-32-chars")
@@ -102,6 +105,7 @@ func TestDockerConfigHasLocalPublicBaseFallback(t *testing.T) {
 
 func TestLoadUsesExampleConfigByDefault(t *testing.T) {
 	t.Setenv("POSTGRES_MCP_CONFIG", "")
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/postgres")
 	t.Setenv("MCP_API_KEY", "example-test-token")
 	t.Setenv("MCP_CITATION_SIGNING_KEY", "example-test-citation-signing-key-with-32-chars")
@@ -130,6 +134,7 @@ func TestLoadUsesExampleConfigByDefault(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
 	t.Setenv("TEST_MCP_TOKEN", "test-token")
 	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -176,6 +181,7 @@ func TestValidateRejectsPlaceholderToken(t *testing.T) {
 }
 
 func TestLoadRejectsMissingCitationSigningKey(t *testing.T) {
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
 	t.Setenv("TEST_MCP_TOKEN", "test-token")
 	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
 	t.Setenv("TEST_CITATION_KEY", "")
@@ -204,6 +210,7 @@ connections:
 }
 
 func TestLoadBuildsIPv6PublicBaseURL(t *testing.T) {
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
 	t.Setenv("TEST_MCP_TOKEN", "test-token")
 	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -230,5 +237,80 @@ connections:
 	}
 	if got := cfg.Server.PublicBaseURL; got != "http://[::1]:8080" {
 		t.Fatalf("unexpected IPv6 public base URL: %q", got)
+	}
+}
+
+func TestLoadOAuthConfigurationFromEnvironment(t *testing.T) {
+	t.Setenv("MCP_PUBLIC_BASE_URL", "https://mcp.example.com")
+	t.Setenv("MCP_OAUTH_ENABLED", "true")
+	t.Setenv("MCP_OAUTH_SIGNING_KEY", "oauth-signing-key-with-at-least-32-characters")
+	t.Setenv("MCP_OAUTH_USERNAME", "chatgpt")
+	t.Setenv("MCP_OAUTH_PASSWORD", "strong-oauth-password-123")
+	t.Setenv("MCP_OAUTH_PRINCIPAL", "reader")
+	t.Setenv("MCP_OAUTH_DEFAULT_SCOPES", "read")
+	t.Setenv("MCP_OAUTH_BASE_SCOPES", "read")
+	t.Setenv("TEST_MCP_TOKEN", "test-token")
+	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`
+server:
+  public_base_url: https://mcp.example.com
+auth:
+  api_keys:
+    - name: reader
+      token_env: TEST_MCP_TOKEN
+      scopes: [read]
+      connections: [crm]
+connections:
+  crm:
+    dsn_env: CRM_DSN
+    schemas: [public]
+oauth:
+  enabled: false
+  signing_key_env: MCP_OAUTH_SIGNING_KEY
+  username_env: MCP_OAUTH_USERNAME
+  password_env: MCP_OAUTH_PASSWORD
+  principal: reader
+  client_id: felsen-chatgpt
+  default_scopes: [read]
+  base_scopes: [read]
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OAuth.Enabled || cfg.OAuth.Issuer != "https://mcp.example.com" || cfg.OAuth.Resource != "https://mcp.example.com" {
+		t.Fatalf("OAuth environment/defaults were not applied: %#v", cfg.OAuth)
+	}
+	if cfg.OAuth.SigningKey == "" || cfg.OAuth.Username != "chatgpt" || cfg.OAuth.Password == "" {
+		t.Fatalf("OAuth secret environment values were not resolved: %#v", cfg.OAuth)
+	}
+}
+
+func TestValidateRejectsOAuthScopeOutsidePrincipal(t *testing.T) {
+	cfg := Config{
+		Server: ServerConfig{
+			Host: "127.0.0.1", Port: 8080, Endpoint: "/mcp", PublicBaseURL: "https://mcp.example.com",
+			CitationTTL: "1m", CitationSigningKey: "citation-key-with-at-least-32-characters", MaxRows: 10, MaxSearchResults: 10, MaxBodyBytes: 1024, MaxConcurrent: 1,
+			QueryTimeout: "1s", SessionTimeout: "1m", ReadHeaderTimeout: "1s", ReadTimeout: "1s", WriteTimeout: "1s", IdleTimeout: "1s",
+		},
+		Auth: AuthConfig{APIKeys: []APIKeyConfig{{
+			Name: "reader", Token: "api-token", Scopes: []string{"read"}, Connections: []string{"default"},
+		}}},
+		OAuth: OAuthConfig{
+			Enabled: true, Issuer: "https://mcp.example.com", Resource: "https://mcp.example.com",
+			SigningKey: "oauth-signing-key-with-at-least-32-characters", Username: "chatgpt", Password: "strong-password",
+			Principal: "reader", ClientID: "felsen-chatgpt", DefaultScopes: []string{"write"}, BaseScopes: []string{"read"},
+			AccessTokenTTL: "1h", RefreshTokenTTL: "24h", AuthorizationCodeTTL: "5m",
+		},
+		Connections: map[string]ConnectionConfig{"default": {
+			DSN: "postgres://user:pass@localhost:5432/db", Schemas: []string{"public"}, MaxRows: 10, MaxAffectedRows: 10, QueryTimeout: "1s",
+		}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected OAuth scope outside the principal to fail validation")
 	}
 }

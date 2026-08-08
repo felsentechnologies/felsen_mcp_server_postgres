@@ -21,6 +21,22 @@ auth:
       scopes: [read]
       connections: [default]
 
+# OAuth 2.1 is disabled by default for local Compose. Enable it in the
+# environment for the ChatGPT connector and provide the secret values below.
+oauth:
+  enabled: false
+  signing_key_env: MCP_OAUTH_SIGNING_KEY
+  username_env: MCP_OAUTH_USERNAME
+  password_env: MCP_OAUTH_PASSWORD
+  principal: reader
+  client_id: felsen-chatgpt
+  client_store_path_env: MCP_OAUTH_CLIENT_STORE_PATH
+  default_scopes: [read]
+  base_scopes: [read]
+  access_token_ttl: 1h
+  refresh_token_ttl: 720h
+  authorization_code_ttl: 5m
+
 connections:
   default:
     dsn_env: DATABASE_URL
