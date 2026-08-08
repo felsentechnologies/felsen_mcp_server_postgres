@@ -374,6 +374,88 @@ func (s *Store) ExecuteDDL(ctx context.Context, connection, sql string) (DDLResu
 	return DDLResult{Message: msg}, validation, nil
 }
 
+// ExecuteScript validates and executes an import script atomically. The
+// caller supplies SQL content; the server never dereferences a client-local
+// path such as /mnt/data. Every statement is checked against the same DML
+// policies, schema allowlist, and DDL guard used by the individual tools.
+func (s *Store) ExecuteScript(ctx context.Context, connection, script string) (ScriptResult, sqlguard.ScriptValidation, error) {
+	db, err := s.db(connection)
+	if err != nil {
+		return ScriptResult{}, sqlguard.ScriptValidation{}, err
+	}
+	if int64(len([]byte(script))) > db.cfg.MaxScriptBytes {
+		return ScriptResult{}, sqlguard.ScriptValidation{}, fmt.Errorf("script is %d bytes, exceeding max_script_bytes=%d", len([]byte(script)), db.cfg.MaxScriptBytes)
+	}
+	validation, err := sqlguard.ValidateScript(script, db.cfg, db.cfg.MaxScriptStatements)
+	if err != nil {
+		return ScriptResult{}, validation, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
+	defer cancel()
+	tx, err := db.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return ScriptResult{}, validation, err
+	}
+	if err := db.setScopedSearchPath(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return ScriptResult{}, validation, err
+	}
+
+	result := ScriptResult{
+		StatementsExecuted: 0,
+		StatementResults:   make([]ScriptStatementResult, 0, len(validation.Statements)),
+	}
+	for i, statement := range validation.Statements {
+		var rowsAffected int64
+		switch statement.Mode {
+		case sqlguard.ModeDML:
+			tag, execErr := tx.Exec(ctx, statement.SQL)
+			if execErr != nil {
+				_ = tx.Rollback(ctx)
+				return result, validation, fmt.Errorf("script statement %d (%s) failed: %w", i+1, statement.Validation.Operation, execErr)
+			}
+			rowsAffected = tag.RowsAffected()
+			result.DMLStatements++
+		case sqlguard.ModeDDL:
+			if _, execErr := tx.Exec(ctx, statement.SQL); execErr != nil {
+				_ = tx.Rollback(ctx)
+				return result, validation, fmt.Errorf("script statement %d (%s) failed: %w", i+1, statement.Validation.Operation, execErr)
+			}
+			result.DDLStatements++
+		default:
+			_ = tx.Rollback(ctx)
+			return result, validation, fmt.Errorf("script statement %d has unsupported execution mode", i+1)
+		}
+
+		result.RowsAffected += rowsAffected
+		if result.RowsAffected > db.cfg.MaxScriptAffectedRows {
+			_ = tx.Rollback(ctx)
+			return result, validation, fmt.Errorf("script affected %d rows, exceeding max_script_affected_rows=%d; transaction rolled back", result.RowsAffected, db.cfg.MaxScriptAffectedRows)
+		}
+		result.StatementsExecuted++
+		result.StatementResults = append(result.StatementResults, ScriptStatementResult{
+			StatementIndex: i + 1,
+			Mode:           string(statement.Mode),
+			Operation:      statement.Validation.Operation,
+			Tables:         statement.Validation.TablesDetected,
+			RowsAffected:   rowsAffected,
+		})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return result, validation, err
+	}
+	result.Message = fmt.Sprintf("SQL script executed atomically: %d statements", result.StatementsExecuted)
+	if result.DDLStatements > 0 {
+		db.mu.Lock()
+		// A script can change table, constraint, or index metadata in any order.
+		// Invalidate the complete cache after the transaction commits.
+		db.cache = map[string]TableDescription{}
+		db.mu.Unlock()
+	}
+	return result, validation, nil
+}
+
 func (s *Store) RefreshSchemaCache(connection string) error {
 	db, err := s.db(connection)
 	if err != nil {

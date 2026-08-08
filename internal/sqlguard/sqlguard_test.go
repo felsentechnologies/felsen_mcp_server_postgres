@@ -1,6 +1,7 @@
 package sqlguard
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/config"
@@ -173,4 +174,81 @@ func TestApplySelectLimitAlwaysCapsExistingLimit(t *testing.T) {
 	if !HasLimit(sql) {
 		t.Fatalf("wrapped query must retain a LIMIT: %q", sql)
 	}
+}
+
+func TestValidateScriptAllowsAtomicImportStatementsAndEnvelopeComments(t *testing.T) {
+	cfg := testConnectionConfig()
+	ddlEnabled := true
+	cfg.DDLEnabled = &ddlEnabled
+	script := `
+-- Schema objects are created before the data import.
+create table public.script_parent (id bigint primary key);
+create table public.script_child (
+  id bigint primary key,
+  parent_id bigint references public.script_parent(id) on delete set null
+);
+/* Indexes can be part of the same atomic script. */
+create index if not exists script_child_parent_idx on public.script_child (parent_id);
+insert into public.users (id, email)
+values (1, '-- not a comment /* inside a string */')
+on conflict (id) do update set email = excluded.email;
+`
+	validated, err := ValidateScript(script, cfg, 10)
+	if err != nil {
+		t.Fatalf("expected script to validate: %v", err)
+	}
+	if got, want := len(validated.Statements), 4; got != want {
+		t.Fatalf("validated statement count = %d, want %d: %#v", got, want, validated)
+	}
+	if got, want := validated.Statements[0].Mode, ModeDDL; got != want {
+		t.Fatalf("first statement mode = %q, want %q", got, want)
+	}
+	if got, want := validated.Statements[3].Mode, ModeDML; got != want {
+		t.Fatalf("last statement mode = %q, want %q", got, want)
+	}
+	if !containsString(validated.TablesDetected, "public.script_parent") ||
+		!containsString(validated.TablesDetected, "public.script_child") ||
+		!containsString(validated.TablesDetected, "public.users") {
+		t.Fatalf("script did not aggregate all referenced tables: %#v", validated.TablesDetected)
+	}
+	if !strings.Contains(validated.Statements[3].SQL, "-- not a comment /* inside a string */") {
+		t.Fatalf("comment-like text inside a string was changed: %q", validated.Statements[3].SQL)
+	}
+}
+
+func TestValidateScriptRejectsUnsupportedStatementsAndEnforcesLimit(t *testing.T) {
+	cfg := testConnectionConfig()
+	ddlEnabled := true
+	cfg.DDLEnabled = &ddlEnabled
+	for _, script := range []string{
+		"select * from public.users",
+		"begin; insert into public.users (id) values (1)",
+		"insert into public.users (id) values (1); commit",
+		"do $$ begin null; end $$",
+	} {
+		if _, err := ValidateScript(script, cfg, 10); err == nil {
+			t.Fatalf("expected script to be rejected: %q", script)
+		}
+	}
+	if _, err := ValidateScript("insert into public.users (id) values (1); insert into public.users (id) values (2)", cfg, 1); err == nil || !strings.Contains(err.Error(), "max_script_statements") {
+		t.Fatalf("expected statement limit error, got %v", err)
+	}
+	if _, err := ValidateScript("-- only a comment", cfg, 10); err == nil {
+		t.Fatal("expected comments-only script to be rejected")
+	}
+}
+
+func TestValidateScriptRejectsUnterminatedComments(t *testing.T) {
+	if _, err := ValidateScript("/* missing end", testConnectionConfig(), 10); err == nil || !strings.Contains(err.Error(), "unterminated block comment") {
+		t.Fatalf("expected unterminated block comment error, got %v", err)
+	}
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }

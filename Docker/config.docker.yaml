@@ -9,7 +9,8 @@ server:
   session_timeout: 30m
   max_rows: 100
   max_search_results: 100
-  max_body_bytes: 1048576
+  # Allows an attached SQL import script to be sent as MCP tool content.
+  max_body_bytes: 8388608
   max_concurrent_requests: 64
   json_response: true
   stateless: true
@@ -47,6 +48,11 @@ connections:
     schemas: [public]
     max_rows: 100
     max_affected_rows: 100
+    # Atomic execute_script import limits. These are separate from the
+    # single-statement DML limit so a multi-row import can be applied safely.
+    max_script_statements: 10000
+    max_script_affected_rows: 10000
+    max_script_bytes: 8388608
     max_conns: 8
     query_timeout: 30s
     # DDL and wildcard DML are enabled by default for the configured schemas.

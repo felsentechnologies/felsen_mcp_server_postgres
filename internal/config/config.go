@@ -18,17 +18,20 @@ import (
 )
 
 const (
-	defaultConfigPath  = "configs/example.yaml"
-	defaultEndpoint    = "/mcp"
-	defaultHost        = "127.0.0.1"
-	defaultPort        = 8080
-	defaultMaxRows     = 100
-	defaultMaxBody     = 1 << 20
-	defaultMaxSearch   = 100
-	defaultMaxConns    = 8
-	defaultMaxAffected = 100
-	defaultCitationTTL = "15m"
-	defaultDDLEnabled  = true
+	defaultConfigPath                  = "configs/example.yaml"
+	defaultEndpoint                    = "/mcp"
+	defaultHost                        = "127.0.0.1"
+	defaultPort                        = 8080
+	defaultMaxRows                     = 100
+	defaultMaxBody                     = 8 << 20
+	defaultMaxSearch                   = 100
+	defaultMaxConns                    = 8
+	defaultMaxAffected                 = 100
+	defaultMaxScriptStatements         = 10000
+	defaultMaxScriptAffectedRows int64 = 10000
+	defaultMaxScriptBytes        int64 = 8 << 20
+	defaultCitationTTL                 = "15m"
+	defaultDDLEnabled                  = true
 )
 
 var defaultDMLOperations = []string{"insert", "update", "delete"}
@@ -119,17 +122,20 @@ type APIKeyConfig struct {
 }
 
 type ConnectionConfig struct {
-	DSN             string        `json:"dsn" yaml:"dsn"`
-	DSNEnv          string        `json:"dsn_env" yaml:"dsn_env"`
-	Schemas         []string      `json:"schemas" yaml:"schemas"`
-	MaxRows         int           `json:"max_rows" yaml:"max_rows"`
-	MaxAffectedRows int           `json:"max_affected_rows" yaml:"max_affected_rows"`
-	MinConns        int           `json:"min_conns" yaml:"min_conns"`
-	MaxConns        int           `json:"max_conns" yaml:"max_conns"`
-	QueryTimeout    string        `json:"query_timeout" yaml:"query_timeout"`
-	Masking         MaskingConfig `json:"masking" yaml:"masking"`
-	DMLPolicies     []DMLPolicy   `json:"dml_policies" yaml:"dml_policies"`
-	DDLEnabled      *bool         `json:"ddl_enabled" yaml:"ddl_enabled"`
+	DSN                   string        `json:"dsn" yaml:"dsn"`
+	DSNEnv                string        `json:"dsn_env" yaml:"dsn_env"`
+	Schemas               []string      `json:"schemas" yaml:"schemas"`
+	MaxRows               int           `json:"max_rows" yaml:"max_rows"`
+	MaxAffectedRows       int           `json:"max_affected_rows" yaml:"max_affected_rows"`
+	MaxScriptStatements   int           `json:"max_script_statements" yaml:"max_script_statements"`
+	MaxScriptAffectedRows int64         `json:"max_script_affected_rows" yaml:"max_script_affected_rows"`
+	MaxScriptBytes        int64         `json:"max_script_bytes" yaml:"max_script_bytes"`
+	MinConns              int           `json:"min_conns" yaml:"min_conns"`
+	MaxConns              int           `json:"max_conns" yaml:"max_conns"`
+	QueryTimeout          string        `json:"query_timeout" yaml:"query_timeout"`
+	Masking               MaskingConfig `json:"masking" yaml:"masking"`
+	DMLPolicies           []DMLPolicy   `json:"dml_policies" yaml:"dml_policies"`
+	DDLEnabled            *bool         `json:"ddl_enabled" yaml:"ddl_enabled"`
 }
 
 type MaskingConfig struct {
@@ -319,6 +325,15 @@ func applyDefaults(cfg *Config) error {
 		}
 		if c.MaxAffectedRows <= 0 {
 			c.MaxAffectedRows = defaultMaxAffected
+		}
+		if c.MaxScriptStatements <= 0 {
+			c.MaxScriptStatements = defaultMaxScriptStatements
+		}
+		if c.MaxScriptAffectedRows <= 0 {
+			c.MaxScriptAffectedRows = defaultMaxScriptAffectedRows
+		}
+		if c.MaxScriptBytes <= 0 {
+			c.MaxScriptBytes = defaultMaxScriptBytes
 		}
 		if c.DDLEnabled == nil {
 			c.DDLEnabled = boolPointer(defaultDDLEnabled)
@@ -714,8 +729,8 @@ func (cfg *Config) Validate() error {
 			}
 			return fmt.Errorf("connection %q query_timeout: %w", name, err)
 		}
-		if c.MaxRows <= 0 || c.MaxAffectedRows <= 0 {
-			return fmt.Errorf("connection %q max_rows and max_affected_rows must be positive", name)
+		if c.MaxRows <= 0 || c.MaxAffectedRows <= 0 || c.MaxScriptStatements <= 0 || c.MaxScriptAffectedRows <= 0 || c.MaxScriptBytes <= 0 {
+			return fmt.Errorf("connection %q row and script limits must be positive", name)
 		}
 		if c.MinConns < 0 || c.MaxConns <= 0 || c.MinConns > c.MaxConns {
 			return fmt.Errorf("connection %q min_conns/max_conns are invalid", name)

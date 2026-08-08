@@ -39,7 +39,7 @@ type App struct {
 func New(cfg *config.Config, store *postgres.Store, auth authn.Authenticator, auditor *audit.Auditor, logger *slog.Logger) http.Handler {
 	app := &App{cfg: cfg, store: store, auth: auth, auditor: auditor, logger: logger}
 	app.server = mcp.NewServer(&mcp.Implementation{Name: "postgres-mcp", Version: version.String()}, &mcp.ServerOptions{
-		Instructions: "Use search to discover database objects and fetch to retrieve their details. Validate DML/DDL before executing it; execute_dml supports INSERT, UPDATE, DELETE and ON CONFLICT, while execute_ddl supports tables, indexes, constraints and foreign keys. Read-only tools may be called without confirmation; database writes require explicit user approval.",
+		Instructions: "Use search to discover database objects and fetch to retrieve their details. Validate DML/DDL before executing it; execute_dml supports INSERT, UPDATE, DELETE and ON CONFLICT, execute_ddl supports tables, indexes, constraints and foreign keys, and execute_script accepts SQL script content for an atomic multi-statement import. Do not send a client-local file path such as /mnt/data; send the file contents in the script field. Read-only tools may be called without confirmation; database writes require explicit user approval.",
 		Logger:       logger,
 	})
 	app.registerResources()
@@ -116,6 +116,7 @@ func (a *App) registerTools() {
 	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_dml", Title: "Execute a database write", Description: "Execute INSERT, UPDATE or DELETE, including INSERT ... ON CONFLICT, only when explicitly allowlisted and approved by the user.", Meta: a.toolSecurityMeta("write"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDML)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Title: "Explain read-only SQL", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_ddl", Title: "Execute database DDL", Description: "Execute allowlisted CREATE TABLE/INDEX, ALTER TABLE constraints and foreign keys, DROP or TRUNCATE statements only when DDL is enabled and explicitly approved. Foreign-key ON DELETE/UPDATE actions are supported; destructive DROP CASCADE remains blocked.", Meta: a.toolSecurityMeta("ddl"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDDL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_script", Title: "Execute an atomic SQL script", Description: "Execute SQL script content containing multiple allowlisted DML and DDL statements in one transaction. Pass the complete content in script; do not pass a client-local file path such as /mnt/data. Every statement is validated, the transaction rolls back if any statement fails or the configured script limits are exceeded, and explicit user approval plus write and ddl scopes are required.", Meta: a.toolSecurityMeta("write", "ddl"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeScript)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "refresh_schema_cache", Title: "Refresh schema cache", Description: "Clear cached schema descriptions for a connection.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.refreshSchemaCache)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "search", Title: "Search database objects", Description: "Search all database connections allowed for this token for tables, columns, and database objects matching a query. Each result ID is an opaque connection-scoped ID for fetch.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.search)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "fetch", Title: "Fetch a database object", Description: "Fetch detailed information about a database object by the opaque connection-scoped ID returned by search.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.fetch)
@@ -297,6 +298,12 @@ type sampleRowsInput struct {
 type sqlInput struct {
 	ConnectionName string `json:"connection_name,omitempty"`
 	SQL            string `json:"sql"`
+}
+
+type executeScriptInput struct {
+	ConnectionName string `json:"connection_name,omitempty" jsonschema:"named Postgres connection; defaults when only one connection is configured"`
+	Script         string `json:"script" jsonschema:"complete SQL script content; multiple allowlisted DML/DDL statements; do not send a file path"`
+	SourceName     string `json:"source_name,omitempty" jsonschema:"optional source filename for audit context; the server never reads this path"`
 }
 
 type validateSQLInput struct {
@@ -513,6 +520,20 @@ func (a *App) executeDDL(ctx context.Context, req *mcp.CallToolRequest, in sqlIn
 	}
 	result, validation, err := a.store.ExecuteDDL(ctx, connection, in.SQL)
 	a.audit(p, connection, "execute_ddl", fingerprint(in.SQL), validation.TablesDetected, err == nil, 0, start, err)
+	return nil, result, err
+}
+
+func (a *App) executeScript(ctx context.Context, req *mcp.CallToolRequest, in executeScriptInput) (*mcp.CallToolResult, postgres.ScriptResult, error) {
+	start := time.Now()
+	p, connection, err := a.authorize(req, in.ConnectionName, "write")
+	if err != nil {
+		return nil, postgres.ScriptResult{}, err
+	}
+	if !p.HasScope("ddl") {
+		return nil, postgres.ScriptResult{}, errors.New("ddl scope is required for execute_script")
+	}
+	result, validation, err := a.store.ExecuteScript(ctx, connection, in.Script)
+	a.audit(p, connection, "execute_script", fingerprint(in.Script), validation.TablesDetected, err == nil, result.RowsAffected, start, err)
 	return nil, result, err
 }
 

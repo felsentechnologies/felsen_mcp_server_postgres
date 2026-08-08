@@ -35,7 +35,7 @@ The image reads the SemVer from the repository `VERSION` file. The Windows
 script passes the current version, commit, and UTC build time as Docker build
 arguments so the running MCP server reports reproducible build metadata.
 
-This stack does not create a Postgres database or initialize schemas. The MCP server connects to the Postgres DSN you provide and introspects only the public schema by default. DDL and wildcard DML are enabled for write-scoped principals, while the reader token remains read-only. Masking stays enabled and the stack fails closed when credentials are missing.
+This stack does not create a Postgres database or initialize schemas. The MCP server connects to the Postgres DSN you provide and introspects only the public schema by default. DDL and wildcard DML are enabled for write-scoped principals, while the reader token remains read-only. Masking stays enabled and the stack fails closed when credentials are missing. The `execute_script` tool accepts SQL content, validates every DML/DDL statement, and executes it atomically; it cannot read a ChatGPT client's `/mnt/data` path.
 
 For a database running on your Windows host, use `host.docker.internal` in the DSN.
 
@@ -89,7 +89,7 @@ MCP_ADMIN_API_KEY=your-long-random-admin-token
 # MCP_DDL_API_KEY=your-long-random-ddl-token
 HTTP_PORT=8080
 IMAGE_NAME=mcp-postgres
-IMAGE_TAG=v0.4.4
+IMAGE_TAG=v0.5.0
 ```
 
 `MCP_OAUTH_PRINCIPAL` is the name of an `auth.api_keys` entry, not a scope.
@@ -99,6 +99,13 @@ admin principal receives all application scopes and configured connections.
 `MCP_DDL_ENABLED` and `MCP_DML_ENABLED` default to `true`; set either to
 `false` to disable that capability globally. The admin scope still does not
 bypass SQL guard policies, row/affected-row limits, or schema restrictions.
+
+The Docker config allocates an 8 MiB HTTP body for attached SQL scripts and
+configures `execute_script` for up to 10,000 statements, 10,000 affected rows,
+and 8 MiB of SQL content per connection. Increase these explicit YAML limits
+only after reviewing the operational and approval impact. The client must send
+the SQL text in the `script` argument; a server container cannot resolve a path
+that exists only in the ChatGPT runtime.
 
 For a versioned Swarm deployment, publish the image as `IMAGE_NAME:IMAGE_TAG`
 and set the same `IMAGE_TAG` in the stack variables. `latest` is convenient for

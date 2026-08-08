@@ -63,3 +63,20 @@ type DMLResult struct {
 type DDLResult struct {
 	Message string `json:"message"`
 }
+
+type ScriptStatementResult struct {
+	StatementIndex int      `json:"statement_index"`
+	Mode           string   `json:"mode"`
+	Operation      string   `json:"operation"`
+	Tables         []string `json:"tables,omitempty"`
+	RowsAffected   int64    `json:"rows_affected"`
+}
+
+type ScriptResult struct {
+	Message            string                  `json:"message"`
+	StatementsExecuted int                     `json:"statements_executed"`
+	DMLStatements      int                     `json:"dml_statements"`
+	DDLStatements      int                     `json:"ddl_statements"`
+	RowsAffected       int64                   `json:"rows_affected"`
+	StatementResults   []ScriptStatementResult `json:"statement_results"`
+}

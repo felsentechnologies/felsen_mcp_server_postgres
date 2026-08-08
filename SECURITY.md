@@ -17,7 +17,8 @@ Use a dedicated read-only PostgreSQL role for read tokens and separate credentia
 - Keep masking enabled and review sensitive-column allowlists.
 - DDL and wildcard DML are enabled by default in the shipped configurations for write-scoped principals; set `MCP_DDL_ENABLED=false` and/or `MCP_DML_ENABLED=false` for read-only deployments, and keep explicit approval enabled for mutation tools.
 - Set a conservative per-connection max_affected_rows; DML over that threshold is rolled back in its transaction.
-- Set require_approval to never only for read-only tools; keep approval enabled for execute_dml and execute_ddl.
+- Set require_approval to never only for read-only tools; keep approval enabled for execute_dml, execute_ddl, and execute_script.
+- Treat `execute_script` as a consequential bulk-write boundary: it accepts SQL content rather than client-local file paths, validates every statement, owns the transaction, and enforces the configured statement, byte, and affected-row limits.
 - Restrict schemas and connections explicitly; avoid wildcard schema access in production.
 - If using the environment-managed admin principal, review its all-connection allowlist and keep DML/DDL policies explicit; `admin` scopes do not disable SQL safety controls.
 - Monitor readiness, audit output, authentication failures, query latency, and database pool saturation.

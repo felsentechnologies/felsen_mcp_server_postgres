@@ -87,7 +87,7 @@ func TestStreamableHTTPContract(t *testing.T) {
 	for _, tool := range tools.Tools {
 		seen[tool.Name] = tool
 	}
-	for _, name := range []string{"search", "fetch", "execute_dml", "execute_ddl"} {
+	for _, name := range []string{"search", "fetch", "execute_dml", "execute_ddl", "execute_script"} {
 		tool, ok := seen[name]
 		if !ok {
 			t.Fatalf("missing tool %q", name)
@@ -103,11 +103,18 @@ func TestStreamableHTTPContract(t *testing.T) {
 		seen["execute_dml"].Annotations.DestructiveHint == nil || !*seen["execute_dml"].Annotations.DestructiveHint {
 		t.Fatal("execute_dml must advertise a consequential destructive operation")
 	}
+	if seen["execute_script"].Annotations == nil || seen["execute_script"].Annotations.ReadOnlyHint ||
+		seen["execute_script"].Annotations.DestructiveHint == nil || !*seen["execute_script"].Annotations.DestructiveHint {
+		t.Fatal("execute_script must advertise a consequential destructive operation")
+	}
 	if _, ok := seen["search"].Meta["securitySchemes"]; !ok {
 		t.Fatalf("search must advertise OAuth security schemes in _meta: %#v", seen["search"].Meta)
 	}
 	if _, ok := seen["execute_dml"].Meta["securitySchemes"]; ok {
 		t.Fatal("read-only OAuth principal must not advertise an unavailable write scope")
+	}
+	if _, ok := seen["execute_script"].Meta["securitySchemes"]; ok {
+		t.Fatal("read-only OAuth principal must not advertise unavailable script scopes")
 	}
 
 	for name, field := range map[string]string{"search": "query", "fetch": "id"} {
@@ -166,6 +173,7 @@ func TestAdminOAuthAdvertisesWriteAndDDLSecuritySchemes(t *testing.T) {
 	}{
 		{name: "execute_dml", scopes: []string{"write"}},
 		{name: "execute_ddl", scopes: []string{"ddl"}},
+		{name: "execute_script", scopes: []string{"write", "ddl"}},
 	} {
 		meta := app.toolSecurityMeta(test.scopes...)
 		if meta == nil {

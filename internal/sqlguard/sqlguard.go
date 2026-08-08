@@ -27,6 +27,24 @@ type ValidationResult struct {
 	Reason         string   `json:"reason,omitempty"`
 }
 
+// ScriptStatement is the validated representation of one executable
+// statement in an import script. SQL is intentionally omitted from JSON
+// output so a caller cannot accidentally receive the complete script back in
+// a tool response or audit payload.
+type ScriptStatement struct {
+	SQL        string           `json:"-"`
+	Mode       Mode             `json:"mode"`
+	Validation ValidationResult `json:"validation"`
+}
+
+// ScriptValidation contains the per-statement decisions made before a script
+// is sent to PostgreSQL. A script is valid only when every statement is an
+// allowlisted DML or DDL operation.
+type ScriptValidation struct {
+	Statements     []ScriptStatement `json:"statements"`
+	TablesDetected []string          `json:"tables_detected"`
+}
+
 type tokenKind uint8
 
 const (
@@ -154,6 +172,184 @@ func Validate(sql string, cfg config.ConnectionConfig, mode Mode) ValidationResu
 		warnings = append(warnings, "query has no LIMIT; execution will be wrapped with a configured limit")
 	}
 	return ValidationResult{Valid: true, ReadOnly: readOnly, Operation: op, TablesDetected: tables, Warnings: warnings}
+}
+
+// ValidateScript splits and validates an import script without executing it.
+// Comments are accepted at the script envelope level because SQL dump files
+// commonly contain comments, but each executable statement still goes through
+// the same conservative single-statement guard used by the regular tools.
+// Transaction-control, read-only, procedural, COPY, and other unallowlisted
+// statements are rejected. The transaction is owned by the store.
+func ValidateScript(script string, cfg config.ConnectionConfig, maxStatements int) (ScriptValidation, error) {
+	result := ScriptValidation{
+		Statements:     []ScriptStatement{},
+		TablesDetected: []string{},
+	}
+	if strings.TrimSpace(script) == "" {
+		return result, fmt.Errorf("script is required")
+	}
+	if maxStatements <= 0 {
+		return result, fmt.Errorf("max_script_statements must be positive")
+	}
+
+	rawStatements, err := splitStatements(script)
+	if err != nil {
+		return result, fmt.Errorf("invalid SQL script syntax: %w", err)
+	}
+	statementNumber := 0
+	for _, raw := range rawStatements {
+		statement, err := stripSQLComments(raw)
+		if err != nil {
+			return result, fmt.Errorf("script statement %d: %w", statementNumber+1, err)
+		}
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		statementNumber++
+		if statementNumber > maxStatements {
+			return result, fmt.Errorf("script contains %d executable statements, exceeding max_script_statements=%d", statementNumber, maxStatements)
+		}
+
+		op := operation(statement)
+		mode := scriptMode(op)
+		if mode == "" {
+			return result, fmt.Errorf("script statement %d: only INSERT, UPDATE, DELETE and allowlisted DDL statements are allowed", statementNumber)
+		}
+		validation := Validate(statement, cfg, mode)
+		if !validation.Valid {
+			reason := validation.Reason
+			if reason == "" {
+				reason = "SQL statement is not allowed"
+			}
+			return result, fmt.Errorf("script statement %d: %s", statementNumber, reason)
+		}
+		result.Statements = append(result.Statements, ScriptStatement{
+			SQL:        statement,
+			Mode:       mode,
+			Validation: validation,
+		})
+		result.TablesDetected = appendUnique(result.TablesDetected, validation.TablesDetected...)
+	}
+	if len(result.Statements) == 0 {
+		return result, fmt.Errorf("script does not contain an executable SQL statement")
+	}
+	return result, nil
+}
+
+func scriptMode(op string) Mode {
+	switch op {
+	case "insert", "update", "delete":
+		return ModeDML
+	case "create", "alter", "drop", "truncate":
+		return ModeDDL
+	default:
+		return ""
+	}
+}
+
+// stripSQLComments removes comments outside quoted strings while preserving
+// newlines and token boundaries. It is deliberately local to scripts:
+// regular execute/validate calls continue to reject comments so their audit
+// and policy behavior stays unchanged.
+func stripSQLComments(sql string) (string, error) {
+	runes := []rune(sql)
+	var result strings.Builder
+	inSingle := false
+	inDouble := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+
+		if inLineComment {
+			if ch == '\n' {
+				result.WriteRune(ch)
+				inLineComment = false
+			} else {
+				result.WriteRune(' ')
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && next == '/' {
+				result.WriteString("  ")
+				i++
+				inBlockComment = false
+			} else if ch == '\n' {
+				result.WriteRune(ch)
+			} else {
+				result.WriteRune(' ')
+			}
+			continue
+		}
+		if !inSingle && !inDouble && ch == '-' && next == '-' {
+			result.WriteString("  ")
+			i++
+			inLineComment = true
+			continue
+		}
+		if !inSingle && !inDouble && ch == '/' && next == '*' {
+			result.WriteString("  ")
+			i++
+			inBlockComment = true
+			continue
+		}
+		if inSingle {
+			result.WriteRune(ch)
+			if ch == '\\' && i+1 < len(runes) {
+				result.WriteRune(runes[i+1])
+				i++
+				continue
+			}
+			if ch == '\'' {
+				if next == '\'' {
+					result.WriteRune(next)
+					i++
+					continue
+				}
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			result.WriteRune(ch)
+			if ch == '"' {
+				if next == '"' {
+					result.WriteRune(next)
+					i++
+					continue
+				}
+				inDouble = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+			result.WriteRune(ch)
+		case '"':
+			inDouble = true
+			result.WriteRune(ch)
+		default:
+			result.WriteRune(ch)
+		}
+	}
+	if inBlockComment {
+		return "", fmt.Errorf("unterminated block comment")
+	}
+	if inSingle {
+		return "", fmt.Errorf("unterminated string literal")
+	}
+	if inDouble {
+		return "", fmt.Errorf("unterminated quoted identifier")
+	}
+	return result.String(), nil
 }
 
 func DetectTables(sql string) []string {

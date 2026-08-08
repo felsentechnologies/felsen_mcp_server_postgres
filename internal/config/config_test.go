@@ -55,6 +55,10 @@ connections:
 	if got := cfg.Connections["crm"].MaxAffectedRows; got != defaultMaxAffected {
 		t.Fatalf("unexpected default max_affected_rows: %d", got)
 	}
+	connection := cfg.Connections["crm"]
+	if connection.MaxScriptStatements != defaultMaxScriptStatements || connection.MaxScriptAffectedRows != defaultMaxScriptAffectedRows || connection.MaxScriptBytes != defaultMaxScriptBytes {
+		t.Fatalf("unexpected script limits: statements=%d rows=%d bytes=%d", connection.MaxScriptStatements, connection.MaxScriptAffectedRows, connection.MaxScriptBytes)
+	}
 	if cfg.Connections["crm"].DDLEnabled == nil || !*cfg.Connections["crm"].DDLEnabled {
 		t.Fatal("DDL should be enabled by default")
 	}
