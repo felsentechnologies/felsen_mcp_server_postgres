@@ -94,6 +94,9 @@ func TestValidateCommonDatabaseManagementDDL(t *testing.T) {
 		"create table public.orders (id bigint primary key, account_id bigint references public.accounts(id) on delete cascade on update cascade)",
 		"alter table public.orders add constraint orders_account_fk foreign key (account_id) references public.accounts(id) on delete cascade",
 		"alter table only public.orders add constraint orders_account_fk_2 foreign key (account_id) references public.accounts(id)",
+		"alter table public.orders add constraint orders_account_fk_3 foreign key (account_id) references public.accounts(id) on delete set null",
+		"alter table public.orders add constraint orders_account_fk_4 foreign key (account_id) references public.accounts(id) on update set default",
+		"alter table public.orders add constraint orders_account_fk_5 foreign key (account_id) references public.accounts(id) on delete no action",
 	} {
 		result := Validate(sql, cfg, ModeDDL)
 		if !result.Valid {

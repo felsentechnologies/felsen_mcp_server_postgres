@@ -626,12 +626,38 @@ func parseAlterTables(tokens []token) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, forbidden := range []string{"rename", "set", "owner", "attach", "detach", "inherit", "no", "replica"} {
-		if containsKeyword(tokens[next:], forbidden) {
+	for i := next; i < len(tokens); i++ {
+		forbidden := ""
+		switch {
+		case isKeyword(tokens[i], "rename"), isKeyword(tokens[i], "owner"),
+			isKeyword(tokens[i], "attach"), isKeyword(tokens[i], "detach"),
+			isKeyword(tokens[i], "inherit"), isKeyword(tokens[i], "replica"):
+			forbidden = strings.ToLower(tokens[i].text)
+		case isKeyword(tokens[i], "set") && !isForeignKeyReferentialAction(tokens, i):
+			forbidden = "set"
+		case isKeyword(tokens[i], "no") && !isForeignKeyReferentialAction(tokens, i):
+			forbidden = "no"
+		}
+		if forbidden != "" {
 			return nil, fmt.Errorf("ALTER TABLE %s is not allowed", forbidden)
 		}
 	}
 	return []string{table}, nil
+}
+
+func isForeignKeyReferentialAction(tokens []token, index int) bool {
+	if index < 2 || !isKeyword(tokens[index-2], "on") ||
+		(!isKeyword(tokens[index-1], "delete") && !isKeyword(tokens[index-1], "update")) {
+		return false
+	}
+	if isKeyword(tokens[index], "set") {
+		return index+1 < len(tokens) &&
+			(isKeyword(tokens[index+1], "null") || isKeyword(tokens[index+1], "default"))
+	}
+	if isKeyword(tokens[index], "no") {
+		return index+1 < len(tokens) && isKeyword(tokens[index+1], "action")
+	}
+	return false
 }
 
 func parseDropTables(tokens []token) ([]string, error) {
