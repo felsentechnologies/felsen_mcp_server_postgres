@@ -87,7 +87,7 @@ func TestStreamableHTTPContract(t *testing.T) {
 	for _, tool := range tools.Tools {
 		seen[tool.Name] = tool
 	}
-	for _, name := range []string{"search", "fetch", "execute_dml", "execute_ddl", "execute_script"} {
+	for _, name := range []string{"search", "fetch", "validate_sql", "validate_dml", "validate_ddl", "execute_dml", "execute_ddl", "execute_script"} {
 		tool, ok := seen[name]
 		if !ok {
 			t.Fatalf("missing tool %q", name)
@@ -116,6 +116,15 @@ func TestStreamableHTTPContract(t *testing.T) {
 	if _, ok := seen["execute_script"].Meta["securitySchemes"]; ok {
 		t.Fatal("read-only OAuth principal must not advertise unavailable script scopes")
 	}
+	if _, ok := seen["validate_sql"].Meta["securitySchemes"]; !ok {
+		t.Fatal("read-only SQL validation must advertise only the read scope")
+	}
+	if _, ok := seen["validate_dml"].Meta["securitySchemes"]; ok {
+		t.Fatal("DML validation must not advertise an unavailable write scope")
+	}
+	if _, ok := seen["validate_ddl"].Meta["securitySchemes"]; ok {
+		t.Fatal("DDL validation must not advertise an unavailable DDL scope")
+	}
 
 	for name, field := range map[string]string{"search": "query", "fetch": "id"} {
 		var schema map[string]any
@@ -135,6 +144,38 @@ func TestStreamableHTTPContract(t *testing.T) {
 		}
 		if _, ok := properties["connection_name"]; ok {
 			t.Fatalf("%s input schema must follow the standard single-argument contract: %s", name, data)
+		}
+	}
+	var validateSchema map[string]any
+	validateData, err := json.Marshal(seen["validate_sql"].InputSchema)
+	if err != nil {
+		t.Fatalf("marshal validate_sql input schema: %v", err)
+	}
+	if err := json.Unmarshal(validateData, &validateSchema); err != nil {
+		t.Fatalf("decode validate_sql input schema: %v", err)
+	}
+	validateProperties, ok := validateSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("validate_sql input schema has no properties: %s", validateData)
+	}
+	if _, ok := validateProperties["mode"]; ok {
+		t.Fatalf("validate_sql must not expose the obsolete mode argument: %s", validateData)
+	}
+	for _, name := range []string{"validate_dml", "validate_ddl"} {
+		data, err := json.Marshal(seen[name].InputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s input schema: %v", name, err)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(data, &schema); err != nil {
+			t.Fatalf("decode %s input schema: %v", name, err)
+		}
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s input schema has no properties: %s", name, data)
+		}
+		if _, ok := properties["sql"]; !ok {
+			t.Fatalf("%s input schema must expose sql: %s", name, data)
 		}
 	}
 }
@@ -174,6 +215,9 @@ func TestAdminOAuthAdvertisesWriteAndDDLSecuritySchemes(t *testing.T) {
 		{name: "execute_dml", scopes: []string{"write"}},
 		{name: "execute_ddl", scopes: []string{"ddl"}},
 		{name: "execute_script", scopes: []string{"write", "ddl"}},
+		{name: "validate_sql", scopes: []string{"read"}},
+		{name: "validate_dml", scopes: []string{"write"}},
+		{name: "validate_ddl", scopes: []string{"ddl"}},
 	} {
 		meta := app.toolSecurityMeta(test.scopes...)
 		if meta == nil {

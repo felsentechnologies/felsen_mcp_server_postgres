@@ -18,6 +18,7 @@ type Event struct {
 	Principal      string    `json:"principal"`
 	Connection     string    `json:"connection,omitempty"`
 	Tool           string    `json:"tool"`
+	SourceName     string    `json:"source_name,omitempty"`
 	SQLFingerprint string    `json:"sql_fingerprint,omitempty"`
 	Tables         []string  `json:"tables,omitempty"`
 	Allowed        bool      `json:"allowed"`

@@ -868,7 +868,6 @@ function Test-MCPValidateSql {
             name = "validate_sql"
             arguments = @{
                 sql = "select 1 as ok"
-                mode = "read"
             }
         }
     } | ConvertTo-Json -Depth 8
@@ -998,7 +997,7 @@ function Show-Menu {
     Write-Host "9. Health check MCP"
     Write-Host "10. Verificar saude da stack"
     Write-Host "11. Testar /mcp tools/list"
-    Write-Host "12. Testar validate_sql"
+    Write-Host "12. Testar validate_sql (somente leitura)"
     Write-Host "13. Testar execute_ddl"
     Write-Host "14. Ver config compose"
     Write-Host "15. Liberar portas no Firewall"

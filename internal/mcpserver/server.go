@@ -111,7 +111,9 @@ func (a *App) registerTools() {
 	mcp.AddTool(a.server, &mcp.Tool{Name: "list_tables", Title: "List database tables", Description: "List tables and views for a schema.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listTables)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "describe_table", Title: "Describe a database table", Description: "Describe columns, primary key, foreign keys and indexes for a table.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.describeTable)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "sample_rows", Title: "Sample database rows", Description: "Return a limited, masked sample of table rows.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.sampleRows)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_sql", Title: "Validate SQL", Description: "Validate read-only SQL, DML policies or allowlisted DDL without executing it.", Meta: a.toolSecurityMeta("read", "write", "ddl"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_sql", Title: "Validate read-only SQL", Description: "Validate a read-only SELECT query without executing it. Use validate_dml or validate_ddl for mutation statements.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_dml", Title: "Validate database write", Description: "Validate an INSERT, UPDATE or DELETE, including INSERT ... ON CONFLICT, against DML policies without executing it.", Meta: a.toolSecurityMeta("write"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateDML)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_ddl", Title: "Validate database DDL", Description: "Validate an allowlisted CREATE, ALTER, DROP or TRUNCATE statement against DDL and schema policies without executing it.", Meta: a.toolSecurityMeta("ddl"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateDDL)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_sql", Title: "Execute read-only SQL", Description: "Execute a validated SELECT query with configured row limits and masking.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, OpenWorldHint: &openWorld}}, a.executeSQL)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_dml", Title: "Execute a database write", Description: "Execute INSERT, UPDATE or DELETE, including INSERT ... ON CONFLICT, only when explicitly allowlisted and approved by the user.", Meta: a.toolSecurityMeta("write"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDML)
 	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Title: "Explain read-only SQL", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Meta: a.toolSecurityMeta("read"), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
@@ -303,13 +305,17 @@ type sqlInput struct {
 type executeScriptInput struct {
 	ConnectionName string `json:"connection_name,omitempty" jsonschema:"named Postgres connection; defaults when only one connection is configured"`
 	Script         string `json:"script" jsonschema:"complete SQL script content; multiple allowlisted DML/DDL statements; do not send a file path"`
-	SourceName     string `json:"source_name,omitempty" jsonschema:"optional source filename for audit context; the server never reads this path"`
+	SourceName     string `json:"source_name,omitempty" jsonschema:"optional non-sensitive source label written to audit logs; never read as a path"`
 }
 
 type validateSQLInput struct {
 	ConnectionName string `json:"connection_name,omitempty"`
 	SQL            string `json:"sql"`
-	Mode           string `json:"mode,omitempty" jsonschema:"read, dml or explain; defaults to read"`
+}
+
+type validateMutationSQLInput struct {
+	ConnectionName string `json:"connection_name,omitempty" jsonschema:"named Postgres connection; defaults when only one connection is configured"`
+	SQL            string `json:"sql" jsonschema:"single DML or DDL statement to validate"`
 }
 
 type refreshCacheOutput struct {
@@ -457,26 +463,38 @@ func (a *App) sampleRows(ctx context.Context, req *mcp.CallToolRequest, in sampl
 }
 
 func (a *App) validateSQL(ctx context.Context, req *mcp.CallToolRequest, in validateSQLInput) (*mcp.CallToolResult, sqlguard.ValidationResult, error) {
-	p, connection, err := a.authorize(req, in.ConnectionName, "read")
+	_, connection, err := a.authorize(req, in.ConnectionName, "read")
 	if err != nil {
 		return nil, sqlguard.ValidationResult{}, err
 	}
+	result, err := a.validateSQLForConnection(connection, in.SQL, sqlguard.ModeRead)
+	return nil, result, err
+}
+
+func (a *App) validateDML(ctx context.Context, req *mcp.CallToolRequest, in validateMutationSQLInput) (*mcp.CallToolResult, sqlguard.ValidationResult, error) {
+	_, connection, err := a.authorize(req, in.ConnectionName, "write")
+	if err != nil {
+		return nil, sqlguard.ValidationResult{}, err
+	}
+	result, err := a.validateSQLForConnection(connection, in.SQL, sqlguard.ModeDML)
+	return nil, result, err
+}
+
+func (a *App) validateDDL(ctx context.Context, req *mcp.CallToolRequest, in validateMutationSQLInput) (*mcp.CallToolResult, sqlguard.ValidationResult, error) {
+	_, connection, err := a.authorize(req, in.ConnectionName, "ddl")
+	if err != nil {
+		return nil, sqlguard.ValidationResult{}, err
+	}
+	result, err := a.validateSQLForConnection(connection, in.SQL, sqlguard.ModeDDL)
+	return nil, result, err
+}
+
+func (a *App) validateSQLForConnection(connection, sql string, mode sqlguard.Mode) (sqlguard.ValidationResult, error) {
 	cfg, ok := a.store.ConnectionConfig(connection)
 	if !ok {
-		return nil, sqlguard.ValidationResult{}, fmt.Errorf("unknown connection: %s", connection)
+		return sqlguard.ValidationResult{}, fmt.Errorf("unknown connection: %s", connection)
 	}
-	mode := sqlguard.Mode(strings.ToLower(in.Mode))
-	if mode == "" {
-		mode = sqlguard.ModeRead
-	}
-	if mode == sqlguard.ModeDML && !p.HasScope("write") {
-		return nil, sqlguard.ValidationResult{Valid: false, Reason: "write scope is required"}, nil
-	}
-	if mode == sqlguard.ModeDDL && !p.HasScope("ddl") {
-		return nil, sqlguard.ValidationResult{Valid: false, Reason: "ddl scope is required"}, nil
-	}
-	result := sqlguard.Validate(in.SQL, cfg, mode)
-	return nil, result, nil
+	return sqlguard.Validate(sql, cfg, mode), nil
 }
 
 func (a *App) executeSQL(ctx context.Context, req *mcp.CallToolRequest, in sqlInput) (*mcp.CallToolResult, postgres.QueryResult, error) {
@@ -533,7 +551,7 @@ func (a *App) executeScript(ctx context.Context, req *mcp.CallToolRequest, in ex
 		return nil, postgres.ScriptResult{}, errors.New("ddl scope is required for execute_script")
 	}
 	result, validation, err := a.store.ExecuteScript(ctx, connection, in.Script)
-	a.audit(p, connection, "execute_script", fingerprint(in.Script), validation.TablesDetected, err == nil, result.RowsAffected, start, err)
+	a.auditWithSource(p, connection, "execute_script", fingerprint(in.Script), validation.TablesDetected, err == nil, result.RowsAffected, start, err, in.SourceName)
 	return nil, result, err
 }
 
@@ -1005,6 +1023,10 @@ func (a *App) resolveConnection(requested string) (string, error) {
 }
 
 func (a *App) audit(p authn.Principal, connection, tool, fp string, tables []string, allowed bool, rows int64, start time.Time, err error) {
+	a.auditWithSource(p, connection, tool, fp, tables, allowed, rows, start, err, "")
+}
+
+func (a *App) auditWithSource(p authn.Principal, connection, tool, fp string, tables []string, allowed bool, rows int64, start time.Time, err error, sourceName string) {
 	msg := ""
 	if err != nil {
 		msg = err.Error()
@@ -1013,6 +1035,7 @@ func (a *App) audit(p authn.Principal, connection, tool, fp string, tables []str
 		Principal:      p.Name,
 		Connection:     connection,
 		Tool:           tool,
+		SourceName:     normalizeSourceName(sourceName),
 		SQLFingerprint: fp,
 		Tables:         tables,
 		Allowed:        allowed,
@@ -1020,6 +1043,18 @@ func (a *App) audit(p authn.Principal, connection, tool, fp string, tables []str
 		DurationMillis: time.Since(start).Milliseconds(),
 		Error:          msg,
 	})
+}
+
+func normalizeSourceName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > 256 {
+		return string(runes[:256])
+	}
+	return value
 }
 
 func resourceJSON(uri string, value any) (*mcp.ReadResourceResult, error) {
