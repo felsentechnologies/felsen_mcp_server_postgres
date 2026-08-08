@@ -35,7 +35,7 @@ The image reads the SemVer from the repository `VERSION` file. The Windows
 script passes the current version, commit, and UTC build time as Docker build
 arguments so the running MCP server reports reproducible build metadata.
 
-This stack does not create a Postgres database or initialize schemas. The MCP server connects to the Postgres DSN you provide and introspects only the public schema by default. The Docker configuration grants read-only access, keeps masking enabled, and fails closed when credentials are missing.
+This stack does not create a Postgres database or initialize schemas. The MCP server connects to the Postgres DSN you provide and introspects only the public schema by default. DDL and wildcard DML are enabled for write-scoped principals, while the reader token remains read-only. Masking stays enabled and the stack fails closed when credentials are missing.
 
 For a database running on your Windows host, use `host.docker.internal` in the DSN.
 
@@ -75,29 +75,30 @@ MCP_OAUTH_RESOURCE=https://mcp.example.com
 MCP_OAUTH_SIGNING_KEY=your-long-random-oauth-key-at-least-32-characters
 MCP_OAUTH_USERNAME=connector-login
 MCP_OAUTH_PASSWORD=your-long-random-oauth-password
-MCP_OAUTH_PRINCIPAL=reader
+MCP_OAUTH_PRINCIPAL=admin
 MCP_OAUTH_CLIENT_ID=felsen-chatgpt
 MCP_OAUTH_CALLBACK_URL=https://chatgpt.com/connector/oauth/<callback-id>
-MCP_OAUTH_DEFAULT_SCOPES=read
-MCP_OAUTH_BASE_SCOPES=read
+MCP_OAUTH_DEFAULT_SCOPES=read,write,ddl,admin
+MCP_OAUTH_BASE_SCOPES=read,write,ddl,admin
+MCP_DDL_ENABLED=true
+MCP_DML_ENABLED=true
 # Required when using MCP_OAUTH_PRINCIPAL=admin.
-# MCP_ADMIN_API_KEY=your-long-random-admin-token
+MCP_ADMIN_API_KEY=your-long-random-admin-token
 # Optional environment principals for write and DDL access.
 # MCP_WRITER_API_KEY=your-long-random-writer-token
 # MCP_DDL_API_KEY=your-long-random-ddl-token
 HTTP_PORT=8080
 IMAGE_NAME=mcp-postgres
-IMAGE_TAG=v0.4.1
+IMAGE_TAG=v0.4.2
 ```
 
 `MCP_OAUTH_PRINCIPAL` is the name of an `auth.api_keys` entry, not a scope.
-The shipped Docker config defines `reader` with read access. Setting
-`MCP_WRITER_API_KEY`, `MCP_DDL_API_KEY`, or `MCP_ADMIN_API_KEY` adds the
-corresponding environment principal with access to all configured connections.
-For full OAuth scope access, set `MCP_ADMIN_API_KEY`, use principal `admin`,
-and set both scope variables to `read,write,ddl,admin`. The `admin` scope still
-does not bypass SQL guard policies, row/affected-row limits, or the
-connection's `ddl_enabled` flag.
+The shipped Docker config defines `reader` with read access and adds the
+optional writer, DDL, and admin principals from their environment tokens. The
+admin principal receives all application scopes and configured connections.
+`MCP_DDL_ENABLED` and `MCP_DML_ENABLED` default to `true`; set either to
+`false` to disable that capability globally. The admin scope still does not
+bypass SQL guard policies, row/affected-row limits, or schema restrictions.
 
 For a versioned Swarm deployment, publish the image as `IMAGE_NAME:IMAGE_TAG`
 and set the same `IMAGE_TAG` in the stack variables. `latest` is convenient for

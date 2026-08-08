@@ -28,7 +28,10 @@ const (
 	defaultMaxConns    = 8
 	defaultMaxAffected = 100
 	defaultCitationTTL = "15m"
+	defaultDDLEnabled  = true
 )
+
+var defaultDMLOperations = []string{"insert", "update", "delete"}
 
 type environmentPrincipal struct {
 	name        string
@@ -38,8 +41,8 @@ type environmentPrincipal struct {
 }
 
 // These optional environment principals keep the Docker/Swarm deployment
-// ergonomic while preserving the read-only reader principal as the default.
-// A principal is added only when its token environment variable is set.
+// ergonomic. A principal is added only when its token environment variable is
+// set; the reader principal remains available for read-only clients.
 var environmentPrincipals = []environmentPrincipal{
 	{name: "writer", tokenEnv: "MCP_WRITER_API_KEY", scopes: []string{"read", "write"}, connections: []string{"*"}},
 	{name: "ddl", tokenEnv: "MCP_DDL_API_KEY", scopes: []string{"read", "write", "ddl"}, connections: []string{"*"}},
@@ -126,7 +129,7 @@ type ConnectionConfig struct {
 	QueryTimeout    string        `json:"query_timeout" yaml:"query_timeout"`
 	Masking         MaskingConfig `json:"masking" yaml:"masking"`
 	DMLPolicies     []DMLPolicy   `json:"dml_policies" yaml:"dml_policies"`
-	DDLEnabled      bool          `json:"ddl_enabled" yaml:"ddl_enabled"`
+	DDLEnabled      *bool         `json:"ddl_enabled" yaml:"ddl_enabled"`
 }
 
 type MaskingConfig struct {
@@ -197,7 +200,9 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
-	applyDefaults(&cfg)
+	if err := applyDefaults(&cfg); err != nil {
+		return nil, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -219,7 +224,12 @@ func envFallback() Config {
 			CitationSigningKey: os.Getenv("MCP_CITATION_SIGNING_KEY"),
 		},
 		Connections: map[string]ConnectionConfig{
-			"default": {DSN: dsn, Schemas: []string{"public"}},
+			"default": {
+				DSN:         dsn,
+				Schemas:     []string{"public"},
+				DMLPolicies: defaultDMLPolicies(),
+				DDLEnabled:  boolPointer(defaultDDLEnabled),
+			},
 		},
 		Audit: AuditConfig{Destination: "stdout"},
 	}
@@ -234,7 +244,7 @@ func envFallback() Config {
 	return cfg
 }
 
-func applyDefaults(cfg *Config) {
+func applyDefaults(cfg *Config) error {
 	if cfg.Server.Host == "" {
 		cfg.Server.Host = defaultHost
 	}
@@ -310,6 +320,12 @@ func applyDefaults(cfg *Config) {
 		if c.MaxAffectedRows <= 0 {
 			c.MaxAffectedRows = defaultMaxAffected
 		}
+		if c.DDLEnabled == nil {
+			c.DDLEnabled = boolPointer(defaultDDLEnabled)
+		}
+		if len(c.DMLPolicies) == 0 {
+			c.DMLPolicies = defaultDMLPolicies()
+		}
 		if c.MaxConns <= 0 {
 			c.MaxConns = defaultMaxConns
 		}
@@ -318,6 +334,61 @@ func applyDefaults(cfg *Config) {
 		}
 		cfg.Connections[name] = c
 	}
+	return applyMutationEnvironment(cfg)
+}
+
+func applyMutationEnvironment(cfg *Config) error {
+	ddlEnabled, ddlSet, err := readEnvironmentBool("MCP_DDL_ENABLED")
+	if err != nil {
+		return err
+	}
+	dmlEnabled, dmlSet, err := readEnvironmentBool("MCP_DML_ENABLED")
+	if err != nil {
+		return err
+	}
+	if !ddlSet && !dmlSet {
+		return nil
+	}
+	for name, connection := range cfg.Connections {
+		if ddlSet {
+			connection.DDLEnabled = boolPointer(ddlEnabled)
+		}
+		if dmlSet {
+			if dmlEnabled {
+				if len(connection.DMLPolicies) == 0 {
+					connection.DMLPolicies = defaultDMLPolicies()
+				}
+			} else {
+				connection.DMLPolicies = nil
+			}
+		}
+		cfg.Connections[name] = connection
+	}
+	return nil
+}
+
+func readEnvironmentBool(name string) (value, set bool, err error) {
+	raw, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false, false, nil
+	}
+	value, err = strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, true, fmt.Errorf("%s must be true or false", name)
+	}
+	return value, true, nil
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func defaultDMLPolicies() []DMLPolicy {
+	return []DMLPolicy{{
+		Schema:     "*",
+		Table:      "*",
+		Operations: append([]string(nil), defaultDMLOperations...),
+	}}
 }
 
 func applyOAuthDefaults(cfg *Config) {
@@ -746,7 +817,7 @@ func (c ConnectionConfig) SchemaAllowed(schema string) bool {
 }
 
 func (c ConnectionConfig) DDLAllowed() bool {
-	return c.DDLEnabled
+	return c.DDLEnabled == nil || *c.DDLEnabled
 }
 
 func (c ConnectionConfig) DMLAllowed(schema, table, operation string) bool {

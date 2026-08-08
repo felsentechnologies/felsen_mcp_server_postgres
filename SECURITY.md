@@ -15,7 +15,7 @@ Use a dedicated read-only PostgreSQL role for read tokens and separate credentia
 - Keep `MCP_API_KEY`, `MCP_WRITER_API_KEY`, `MCP_DDL_API_KEY`, and `MCP_ADMIN_API_KEY` as separate secrets; the latter grants all application scopes and configured connections.
 - Remove all placeholder values before deployment; configuration validation fails closed on known placeholders.
 - Keep masking enabled and review sensitive-column allowlists.
-- Keep DML and DDL disabled unless a named policy and explicit approval workflow exist.
+- DDL and wildcard DML are enabled by default in the shipped configurations for write-scoped principals; set `MCP_DDL_ENABLED=false` and/or `MCP_DML_ENABLED=false` for read-only deployments, and keep explicit approval enabled for mutation tools.
 - Set a conservative per-connection max_affected_rows; DML over that threshold is rolled back in its transaction.
 - Set require_approval to never only for read-only tools; keep approval enabled for execute_dml and execute_ddl.
 - Restrict schemas and connections explicitly; avoid wildcard schema access in production.

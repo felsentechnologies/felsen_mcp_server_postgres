@@ -101,7 +101,8 @@ func TestValidateRejectsParserBypasses(t *testing.T) {
 
 func TestValidateRejectsUnallowlistedDDL(t *testing.T) {
 	cfg := testConnectionConfig()
-	cfg.DDLEnabled = true
+	ddlEnabled := true
+	cfg.DDLEnabled = &ddlEnabled
 	for _, sql := range []string{
 		"create schema public",
 		"create table public.copy (like private.users)",

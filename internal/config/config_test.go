@@ -9,6 +9,8 @@ import (
 func TestLoadYAMLConfig(t *testing.T) {
 	t.Setenv("MCP_PUBLIC_BASE_URL", "")
 	t.Setenv("MCP_OAUTH_ENABLED", "false")
+	t.Setenv("MCP_DDL_ENABLED", "")
+	t.Setenv("MCP_DML_ENABLED", "")
 	t.Setenv("CRM_DSN", "postgres://user:pass@localhost:5432/crm")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte(`
@@ -53,6 +55,62 @@ connections:
 	if got := cfg.Connections["crm"].MaxAffectedRows; got != defaultMaxAffected {
 		t.Fatalf("unexpected default max_affected_rows: %d", got)
 	}
+	if cfg.Connections["crm"].DDLEnabled == nil || !*cfg.Connections["crm"].DDLEnabled {
+		t.Fatal("DDL should be enabled by default")
+	}
+}
+
+func TestMutationEnvironmentFlags(t *testing.T) {
+	t.Setenv("MCP_OAUTH_ENABLED", "false")
+	t.Setenv("MCP_PUBLIC_BASE_URL", "")
+	t.Setenv("MCP_DDL_ENABLED", "false")
+	t.Setenv("MCP_DML_ENABLED", "false")
+	t.Setenv("MUTATION_TEST_TOKEN", "mutation-test-token")
+	t.Setenv("MUTATION_TEST_DSN", "postgres://user:pass@localhost:5432/mutation")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`
+server:
+  public_base_url: http://localhost:9000
+auth:
+  api_keys:
+    - name: admin
+      token_env: MUTATION_TEST_TOKEN
+      scopes: [read, write, ddl, admin]
+      connections: [default]
+connections:
+  default:
+    dsn_env: MUTATION_TEST_DSN
+    schemas: [public]
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := cfg.Connections["default"]
+	if connection.DDLEnabled == nil || *connection.DDLEnabled {
+		t.Fatal("MCP_DDL_ENABLED=false should disable DDL")
+	}
+	if connection.DMLAllowed("public", "customers", "insert") {
+		t.Fatal("MCP_DML_ENABLED=false should disable DML")
+	}
+
+	t.Setenv("MCP_DDL_ENABLED", "true")
+	t.Setenv("MCP_DML_ENABLED", "true")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection = cfg.Connections["default"]
+	if connection.DDLEnabled == nil || !*connection.DDLEnabled {
+		t.Fatal("MCP_DDL_ENABLED=true should enable DDL")
+	}
+	if !connection.DMLAllowed("public", "customers", "insert") || !connection.DMLAllowed("public", "customers", "delete") {
+		t.Fatal("MCP_DML_ENABLED=true should enable the default wildcard DML policy")
+	}
 }
 
 func TestPublicBaseURLEnvironmentOverridesFile(t *testing.T) {
@@ -90,6 +148,8 @@ connections:
 func TestDockerConfigHasLocalPublicBaseFallback(t *testing.T) {
 	t.Setenv("MCP_PUBLIC_BASE_URL", "")
 	t.Setenv("MCP_OAUTH_ENABLED", "false")
+	t.Setenv("MCP_DDL_ENABLED", "")
+	t.Setenv("MCP_DML_ENABLED", "")
 	t.Setenv("MCP_WRITER_API_KEY", "")
 	t.Setenv("MCP_DDL_API_KEY", "")
 	t.Setenv("MCP_ADMIN_API_KEY", "")
@@ -103,6 +163,13 @@ func TestDockerConfigHasLocalPublicBaseFallback(t *testing.T) {
 	}
 	if got := cfg.Server.PublicBaseURL; got != "http://localhost:8080" {
 		t.Fatalf("unexpected Docker local public base URL: %q", got)
+	}
+	connection := cfg.Connections["default"]
+	if connection.DDLEnabled == nil || !*connection.DDLEnabled {
+		t.Fatal("Docker config should enable DDL by default")
+	}
+	if !connection.DMLAllowed("public", "crm_contacts", "update") {
+		t.Fatal("Docker config should enable the default DML policy")
 	}
 }
 
@@ -204,6 +271,13 @@ func TestLoadOAuthAdminPrincipalFromEnvironment(t *testing.T) {
 	}
 	if len(admin.Connections) != 1 || admin.Connections[0] != "*" {
 		t.Fatalf("admin connections = %#v, want [*]", admin.Connections)
+	}
+	connection := cfg.Connections["default"]
+	if connection.DDLEnabled == nil || !*connection.DDLEnabled {
+		t.Fatal("OAuth admin configuration should have DDL enabled")
+	}
+	if !connection.DMLAllowed("public", "crm_contacts", "insert") {
+		t.Fatal("OAuth admin configuration should have the default DML policy")
 	}
 }
 

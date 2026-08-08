@@ -7,6 +7,8 @@ param(
     [string]$McpWriterApiKey = "",
     [string]$McpDdlApiKey = "",
     [string]$McpAdminApiKey = "",
+    [bool]$DdlEnabled = $true,
+    [bool]$DmlEnabled = $true,
     [string]$CitationSigningKey = "",
     [string]$PublicBaseUrl = "",
     [bool]$OAuthEnabled = $false,
@@ -56,6 +58,8 @@ $McpApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpApiKey)
 $McpWriterApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpWriterApiKey)
 $McpDdlApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpDdlApiKey)
 $McpAdminApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpAdminApiKey)
+$DdlEnabledWasProvided = $PSBoundParameters.ContainsKey("DdlEnabled")
+$DmlEnabledWasProvided = $PSBoundParameters.ContainsKey("DmlEnabled")
 $CitationSigningKeyWasProvided = -not [string]::IsNullOrWhiteSpace($CitationSigningKey)
 $OAuthEnabledWasProvided = $PSBoundParameters.ContainsKey("OAuthEnabled")
 $OAuthIssuerWasProvided = -not [string]::IsNullOrWhiteSpace($OAuthIssuer)
@@ -246,6 +250,21 @@ function Sync-DevEnv {
         $script:McpAdminApiKey = $values["MCP_ADMIN_API_KEY"]
     }
 
+    if (-not $DdlEnabledWasProvided -and $values.ContainsKey("MCP_DDL_ENABLED")) {
+        $parsedDdlEnabled = $false
+        if (-not [bool]::TryParse($values["MCP_DDL_ENABLED"], [ref]$parsedDdlEnabled)) {
+            throw "MCP_DDL_ENABLED must be true or false."
+        }
+        $script:DdlEnabled = $parsedDdlEnabled
+    }
+    if (-not $DmlEnabledWasProvided -and $values.ContainsKey("MCP_DML_ENABLED")) {
+        $parsedDmlEnabled = $false
+        if (-not [bool]::TryParse($values["MCP_DML_ENABLED"], [ref]$parsedDmlEnabled)) {
+            throw "MCP_DML_ENABLED must be true or false."
+        }
+        $script:DmlEnabled = $parsedDmlEnabled
+    }
+
     if (-not $CitationSigningKeyWasProvided) {
         if ($values.ContainsKey("MCP_CITATION_SIGNING_KEY") -and -not [string]::IsNullOrWhiteSpace($values["MCP_CITATION_SIGNING_KEY"])) {
             $script:CitationSigningKey = $values["MCP_CITATION_SIGNING_KEY"]
@@ -313,16 +332,16 @@ function Sync-DevEnv {
         $script:OAuthResource = $PublicBaseUrl
     }
     if ([string]::IsNullOrWhiteSpace($OAuthPrincipal)) {
-        $script:OAuthPrincipal = "reader"
+        $script:OAuthPrincipal = "admin"
     }
     if ([string]::IsNullOrWhiteSpace($OAuthClientId)) {
         $script:OAuthClientId = "felsen-chatgpt"
     }
     if ([string]::IsNullOrWhiteSpace($OAuthDefaultScopes)) {
-        $script:OAuthDefaultScopes = "read"
+        $script:OAuthDefaultScopes = "read,write,ddl,admin"
     }
     if ([string]::IsNullOrWhiteSpace($OAuthBaseScopes)) {
-        $script:OAuthBaseScopes = "read"
+        $script:OAuthBaseScopes = "read,write,ddl,admin"
     }
     if ($OAuthEnabled) {
         if ([string]::IsNullOrWhiteSpace($OAuthSigningKey) -or $OAuthSigningKey -match "(?i)^(change-me|replace-with|your-)") {
@@ -363,6 +382,8 @@ function Save-EnvFile {
     $lines += "MCP_WRITER_API_KEY=$McpWriterApiKey"
     $lines += "MCP_DDL_API_KEY=$McpDdlApiKey"
     $lines += "MCP_ADMIN_API_KEY=$McpAdminApiKey"
+    $lines += "MCP_DDL_ENABLED=$($DdlEnabled.ToString().ToLowerInvariant())"
+    $lines += "MCP_DML_ENABLED=$($DmlEnabled.ToString().ToLowerInvariant())"
     $lines += "MCP_CITATION_SIGNING_KEY=$CitationSigningKey"
     $lines += "MCP_PUBLIC_BASE_URL=$PublicBaseUrl"
     $lines += "MCP_OAUTH_ENABLED=$($OAuthEnabled.ToString().ToLowerInvariant())"
@@ -542,6 +563,8 @@ function Set-ComposeEnvironment {
     $env:MCP_WRITER_API_KEY = $McpWriterApiKey
     $env:MCP_DDL_API_KEY = $McpDdlApiKey
     $env:MCP_ADMIN_API_KEY = $McpAdminApiKey
+    $env:MCP_DDL_ENABLED = $DdlEnabled.ToString().ToLowerInvariant()
+    $env:MCP_DML_ENABLED = $DmlEnabled.ToString().ToLowerInvariant()
     $env:MCP_CITATION_SIGNING_KEY = $CitationSigningKey
     $env:MCP_PUBLIC_BASE_URL = $PublicBaseUrl
     $env:MCP_OAUTH_ENABLED = $OAuthEnabled.ToString().ToLowerInvariant()
@@ -931,6 +954,8 @@ function Write-StackInfo {
     Write-Host "MCP Endpoint: http://localhost:$HostPort/mcp" -ForegroundColor Green
     Write-Host "Health:       http://localhost:$HostPort/healthz" -ForegroundColor Green
     Write-Host "API Key:      configured" -ForegroundColor Yellow
+    Write-Host "DDL:          $(if ($DdlEnabled) { 'enabled' } else { 'disabled' })" -ForegroundColor $(if ($DdlEnabled) { 'Yellow' } else { 'Green' })
+    Write-Host "DML:          $(if ($DmlEnabled) { 'enabled' } else { 'disabled' })" -ForegroundColor $(if ($DmlEnabled) { 'Yellow' } else { 'Green' })
     if ($OAuthEnabled) {
         Write-Host "OAuth Auth:   $($PublicBaseUrl.TrimEnd('/'))/oauth/authorize" -ForegroundColor Green
         Write-Host "OAuth Token:  $($PublicBaseUrl.TrimEnd('/'))/oauth/token" -ForegroundColor Green
@@ -958,6 +983,8 @@ function Show-Menu {
     Write-Host "Porta PG:      $PostgresPort"
     Write-Host "API Key:       $(if ($McpApiKey) { 'configurado' } else { 'sera gerada' })"
     Write-Host "Admin Key:     $(if ($McpAdminApiKey) { 'configurado' } else { 'nao configurado' })"
+    Write-Host "DDL:           $(if ($DdlEnabled) { 'habilitado' } else { 'desabilitado' })"
+    Write-Host "DML:           $(if ($DmlEnabled) { 'habilitado' } else { 'desabilitado' })"
     Write-Host "OAuth:         $(if ($OAuthEnabled) { 'habilitado' } else { 'desabilitado' })"
     Write-Host ""
     Write-Host "1. Buildar imagem Docker"

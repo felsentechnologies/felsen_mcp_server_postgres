@@ -24,7 +24,7 @@ The default local endpoint is:
 http://127.0.0.1:8080/mcp
 ```
 
-Every MCP request must send Authorization: Bearer <MCP_API_KEY>. The example configuration grants only read access to the public schema, enables masking, disables DML/DDL, and caps results at 100 rows. Do not put tokens directly in YAML or commit real credentials.
+Every MCP request must send Authorization: Bearer <MCP_API_KEY>. The reader token remains read-only; the example configuration enables DDL and wildcard DML for the configured schemas so a write-scoped principal can manage tables, indexes, and rows. Set `MCP_DDL_ENABLED=false` or `MCP_DML_ENABLED=false` to disable either capability. Do not put tokens directly in YAML or commit real credentials.
 
 `server.public_base_url` is required because search and fetch return absolute, user-openable citation URLs. The local Docker stack defaults it to `http://localhost:8080`; for a published deployment, set `MCP_PUBLIC_BASE_URL` to the public HTTPS origin. The example signs source URLs with `MCP_CITATION_SIGNING_KEY` for 15 minutes; keep that key secret.
 
@@ -55,11 +55,14 @@ MCP_OAUTH_RESOURCE=https://mcp.example.com
 MCP_OAUTH_SIGNING_KEY=<long-random-secret-at-least-32-characters>
 MCP_OAUTH_USERNAME=<connector-login>
 MCP_OAUTH_PASSWORD=<long-random-password>
-MCP_OAUTH_PRINCIPAL=reader
+MCP_OAUTH_PRINCIPAL=admin
 MCP_OAUTH_CALLBACK_URL=https://chatgpt.com/connector/oauth/<callback-id>
-MCP_OAUTH_DEFAULT_SCOPES=read
-MCP_OAUTH_BASE_SCOPES=read
+MCP_OAUTH_DEFAULT_SCOPES=read,write,ddl,admin
+MCP_OAUTH_BASE_SCOPES=read,write,ddl,admin
 ```
+
+Set `MCP_ADMIN_API_KEY` to create the full-access OAuth principal. Use
+`MCP_OAUTH_PRINCIPAL=reader` with `read` scopes for a read-only connector.
 
 The protected-resource metadata, authorization-server metadata, DCR, authorization, and token endpoints are respectively exposed at:
 
@@ -73,7 +76,15 @@ The protected-resource metadata, authorization-server metadata, DCR, authorizati
 
 In ChatGPT's advanced authentication settings, use Dynamic Client Registration after the registration endpoint is discovered. If using User-Defined OAuth Client, use client ID `felsen-chatgpt`, leave the client secret empty, select token endpoint auth method `none`, and use the configured default/base scopes. Set `MCP_OAUTH_CALLBACK_URL` in `.env` to the exact callback URL shown by ChatGPT, then restart the server. This value is required when OAuth is enabled, and the static client compares `redirect_uri` exactly against it; no callback domain or path is hardcoded. Dynamic registrations retain the exact callback URL submitted by ChatGPT. OIDC remains intentionally disabled because this bootstrap provider does not claim an email identity.
 
-`MCP_OAUTH_PRINCIPAL` is the name of an entry under `auth.api_keys`, not a scope. The shipped Docker configuration has a read-only `reader` principal. Setting `MCP_WRITER_API_KEY`, `MCP_DDL_API_KEY`, or `MCP_ADMIN_API_KEY` creates the corresponding environment principal with access to all configured connections. For full OAuth scope access, set `MCP_ADMIN_API_KEY`, `MCP_OAUTH_PRINCIPAL=admin`, `MCP_OAUTH_DEFAULT_SCOPES=read,write,ddl,admin`, and `MCP_OAUTH_BASE_SCOPES=read,write,ddl,admin`. The `admin` scope does not bypass the SQL safety guard, DML policies, row limits, or a connection's `ddl_enabled` setting.
+`MCP_OAUTH_PRINCIPAL` is the name of an entry under `auth.api_keys`, not a scope. The shipped Docker configuration has a read-only `reader` principal and adds `writer`, `ddl`, or `admin` when the corresponding environment token is set. For full OAuth scope access, set `MCP_ADMIN_API_KEY`, `MCP_OAUTH_PRINCIPAL=admin`, and request `read,write,ddl,admin`. The `admin` scope does not bypass the SQL safety guard, DML policies, row limits, or schema restrictions.
+
+Mutation defaults are controlled globally by `MCP_DDL_ENABLED` and
+`MCP_DML_ENABLED`, both defaulting to `true` in the shipped Docker and local
+configurations. DML uses the default policy `{schema: "*", table: "*", operations:
+[insert, update, delete]}` within the configured schemas. Each connection still
+enforces `max_affected_rows` (100 by default). Add narrower `dml_policies` under
+`connections.<name>` in the selected YAML file, or set the flags to `false` for
+a restricted deployment.
 
 The MCP endpoint still returns a standards-compliant `401` with `resource_metadata` when no bearer is present. ChatGPT uses that challenge to discover OAuth and then calls `initialize`/`tools/list` with the access token; `tools/list` is not made public because exposing discovery must not bypass database authorization. Existing API-key bearer clients continue to work.
 
@@ -117,13 +128,13 @@ The repository root `VERSION` file is the SemVer source of truth. It is advertis
 - The SQL guard is conservative and denies comments, dollar-quoted strings, multiple statements/relation lists, row-locking clauses, dangerous functions, CTEs, and non-allowlisted DDL.
 - Read SQL runs in a PostgreSQL READ ONLY transaction.
 - SQL result rows are capped server-side, including queries that already contain a larger LIMIT.
-- DML requires a matching schema/table/operation policy and rolls back when `max_affected_rows` (100 by default) is exceeded; DDL is disabled by default and rejects CASCADE and multi-object operations.
+- DML is enabled by the shipped wildcard policy for configured schemas and rolls back when `max_affected_rows` (100 by default) is exceeded; DDL is enabled by default in the shipped configurations and still rejects CASCADE and multi-object operations.
 - Results are masked using sensitive-column patterns unless explicitly allowed by connection configuration.
 - HTTP body size, request concurrency, read/write/idle timeouts, readiness checks, and audit write errors are enforced.
 
 ## Docker
 
-Copy .env.example to .env, replace every replace-with-* value, and set MCP_PUBLIC_BASE_URL. Compose fails closed when database credentials, the reader token, or the citation signing key are missing. The Docker configuration is read-only, restricted to public, and masking remains enabled.
+Copy .env.example to .env, replace every replace-with-* value, and set MCP_PUBLIC_BASE_URL. Compose fails closed when database credentials, the reader token, or the citation signing key are missing. The Docker configuration enables mutation tools for write-scoped principals, remains restricted to the public schema by default, and keeps masking enabled.
 
 ```powershell
 Copy-Item .env.example .env

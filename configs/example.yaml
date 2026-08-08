@@ -28,13 +28,13 @@ oauth:
   signing_key_env: MCP_OAUTH_SIGNING_KEY
   username_env: MCP_OAUTH_USERNAME
   password_env: MCP_OAUTH_PASSWORD
-  principal: reader
+  principal: admin
   client_id: felsen-chatgpt
   # Exact ChatGPT callback URL(s); MCP_OAUTH_CALLBACK_URL overrides this list.
   redirect_uris: []
   client_store_path_env: MCP_OAUTH_CLIENT_STORE_PATH
-  default_scopes: [read]
-  base_scopes: [read]
+  default_scopes: [read, write, ddl, admin]
+  base_scopes: [read, write, ddl, admin]
   access_token_ttl: 1h
   refresh_token_ttl: 720h
   authorization_code_ttl: 5m
@@ -47,7 +47,13 @@ connections:
     max_affected_rows: 100
     max_conns: 8
     query_timeout: 30s
-    ddl_enabled: false
+    # DDL and wildcard DML are enabled by default for the configured schemas.
+    # Set MCP_DDL_ENABLED=false or MCP_DML_ENABLED=false to disable them.
+    ddl_enabled: true
+    dml_policies:
+      - schema: "*"
+        table: "*"
+        operations: [insert, update, delete]
     masking:
       enabled: true
 
