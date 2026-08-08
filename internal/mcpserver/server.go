@@ -2,7 +2,9 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/config"
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/postgres"
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/sqlguard"
+	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version"
 )
 
 type App struct {
@@ -33,7 +37,10 @@ type App struct {
 
 func New(cfg *config.Config, store *postgres.Store, auth *authn.Manager, auditor *audit.Auditor, logger *slog.Logger) http.Handler {
 	app := &App{cfg: cfg, store: store, auth: auth, auditor: auditor, logger: logger}
-	app.server = mcp.NewServer(&mcp.Implementation{Name: "postgres-mcp", Version: "v0.2.0"}, nil)
+	app.server = mcp.NewServer(&mcp.Implementation{Name: "postgres-mcp", Version: version.String()}, &mcp.ServerOptions{
+		Instructions: "Use search to discover database objects and fetch to retrieve their details. Read-only tools may be called without confirmation; execute_dml and execute_ddl are consequential and require explicit user approval.",
+		Logger:       logger,
+	})
 	app.registerResources()
 	app.registerTools()
 
@@ -52,9 +59,15 @@ func New(cfg *config.Config, store *postgres.Store, auth *authn.Manager, auditor
 		return app.server
 	}, nil)
 
-	mux.Handle("/mcp", streamableHandler)
+	endpoint := strings.TrimRight(cfg.Server.Endpoint, "/")
+	mux.Handle(endpoint, streamableHandler)
+	if endpoint != "/" {
+		mux.Handle(endpoint+"/", streamableHandler)
+	}
 	mux.Handle("/sse", sseHandler)
 	mux.Handle("/sse/", sseHandler)
+	mux.Handle("/sources", http.HandlerFunc(app.sourceHTTPHandler))
+	mux.Handle("/sources/", http.HandlerFunc(app.sourceHTTPHandler))
 
 	return mux
 }
@@ -87,21 +100,21 @@ func (a *App) registerResources() {
 
 func (a *App) registerTools() {
 	readOnly := true
-	openWorld := false
+	openWorld := true
 	destructive := true
-	mcp.AddTool(a.server, &mcp.Tool{Name: "list_connections", Description: "List named Postgres connections allowed for this token.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listConnections)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "list_schemas", Description: "List allowed schemas in a Postgres connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listSchemas)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "list_tables", Description: "List tables and views for a schema.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listTables)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "describe_table", Description: "Describe columns, primary key, foreign keys and indexes for a table.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.describeTable)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "sample_rows", Description: "Return a limited, masked sample of table rows.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.sampleRows)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_sql", Description: "Validate SQL against read-only or DML policies without executing it.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateSQL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_sql", Description: "Execute a validated SELECT query with configured row limits and masking.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, OpenWorldHint: &openWorld}}, a.executeSQL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_dml", Description: "Execute INSERT, UPDATE or DELETE only when explicitly allowlisted.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDML)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_ddl", Description: "Execute DDL statements (CREATE, ALTER, DROP, TRUNCATE) when DDL is enabled for the connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDDL)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "refresh_schema_cache", Description: "Clear cached schema descriptions for a connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.refreshSchemaCache)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "search", Description: "Search for tables, columns, and database objects matching a query.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.search)
-	mcp.AddTool(a.server, &mcp.Tool{Name: "fetch", Description: "Fetch detailed information about a database object by ID (schema.table or schema.table.column).", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.fetch)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "list_connections", Title: "List database connections", Description: "List named Postgres connections allowed for this token.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listConnections)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "list_schemas", Title: "List database schemas", Description: "List allowed schemas in a Postgres connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listSchemas)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "list_tables", Title: "List database tables", Description: "List tables and views for a schema.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.listTables)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "describe_table", Title: "Describe a database table", Description: "Describe columns, primary key, foreign keys and indexes for a table.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.describeTable)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "sample_rows", Title: "Sample database rows", Description: "Return a limited, masked sample of table rows.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.sampleRows)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "validate_sql", Title: "Validate SQL", Description: "Validate SQL against read-only or DML policies without executing it.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.validateSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_sql", Title: "Execute read-only SQL", Description: "Execute a validated SELECT query with configured row limits and masking.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly, OpenWorldHint: &openWorld}}, a.executeSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_dml", Title: "Execute a database write", Description: "Execute INSERT, UPDATE or DELETE only when explicitly allowlisted and approved by the user.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDML)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "explain_sql", Title: "Explain read-only SQL", Description: "Run EXPLAIN (FORMAT JSON) for a validated SELECT query.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.explainSQL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "execute_ddl", Title: "Execute database DDL", Description: "Execute allowlisted CREATE, ALTER, DROP or TRUNCATE statements only when DDL is enabled and explicitly approved.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, OpenWorldHint: &openWorld}}, a.executeDDL)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "refresh_schema_cache", Title: "Refresh schema cache", Description: "Clear cached schema descriptions for a connection.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.refreshSchemaCache)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "search", Title: "Search database objects", Description: "Search all database connections allowed for this token for tables, columns, and database objects matching a query. Each result ID is an opaque connection-scoped ID for fetch.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.search)
+	mcp.AddTool(a.server, &mcp.Tool{Name: "fetch", Title: "Fetch a database object", Description: "Fetch detailed information about a database object by the opaque connection-scoped ID returned by search.", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld}}, a.fetch)
 }
 
 type connectionInput struct {
@@ -158,8 +171,7 @@ type refreshCacheOutput struct {
 }
 
 type searchInput struct {
-	Query          string `json:"query" jsonschema:"search query to find tables, columns, or database objects"`
-	ConnectionName string `json:"connection_name,omitempty"`
+	Query string `json:"query" jsonschema:"search query to find tables, columns, or database objects"`
 }
 
 type searchResultItem struct {
@@ -173,8 +185,7 @@ type searchOutput struct {
 }
 
 type fetchInput struct {
-	ID             string `json:"id" jsonschema:"object ID in format schema.table or schema.table.column"`
-	ConnectionName string `json:"connection_name,omitempty"`
+	ID string `json:"id" jsonschema:"opaque object ID returned by search"`
 }
 
 type fetchOutput struct {
@@ -183,6 +194,61 @@ type fetchOutput struct {
 	Text     string            `json:"text"`
 	URL      string            `json:"url"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+const objectIDPrefix = "pg:v1:"
+
+type objectReference struct {
+	Connection string `json:"connection"`
+	Schema     string `json:"schema"`
+	Table      string `json:"table"`
+	Column     string `json:"column,omitempty"`
+}
+
+func encodeObjectID(ref objectReference) string {
+	payload, _ := json.Marshal(ref)
+	return objectIDPrefix + base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeObjectID(id string) (objectReference, error) {
+	if !strings.HasPrefix(id, objectIDPrefix) {
+		return objectReference{}, fmt.Errorf("invalid ID format: expected a connection-scoped ID returned by search")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(id, objectIDPrefix))
+	if err != nil {
+		return objectReference{}, fmt.Errorf("invalid object ID encoding: %w", err)
+	}
+	var ref objectReference
+	if err := json.Unmarshal(payload, &ref); err != nil {
+		return objectReference{}, fmt.Errorf("invalid object ID payload: %w", err)
+	}
+	if strings.TrimSpace(ref.Connection) == "" || strings.TrimSpace(ref.Schema) == "" || strings.TrimSpace(ref.Table) == "" {
+		return objectReference{}, errors.New("invalid object ID: connection, schema, and table are required")
+	}
+	return ref, nil
+}
+
+func decodeLegacyObjectID(id, connection string) (objectReference, error) {
+	parts := strings.Split(id, ".")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
+		return objectReference{}, fmt.Errorf("invalid legacy ID format: expected schema.table or schema.table.column, got: %s", id)
+	}
+	ref := objectReference{Connection: connection, Schema: parts[0], Table: parts[1]}
+	if len(parts) == 3 {
+		if parts[2] == "" {
+			return objectReference{}, fmt.Errorf("invalid legacy ID format: empty column in %s", id)
+		}
+		ref.Column = parts[2]
+	}
+	return ref, nil
+}
+
+func objectTitle(ref objectReference) string {
+	title := ref.Connection + ":" + ref.Schema + "." + ref.Table
+	if ref.Column != "" {
+		title += "." + ref.Column
+	}
+	return title
 }
 
 func (a *App) listConnections(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listConnectionsOutput, error) {
@@ -323,9 +389,12 @@ func (a *App) refreshSchemaCache(ctx context.Context, req *mcp.CallToolRequest, 
 
 func (a *App) search(ctx context.Context, req *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
 	start := time.Now()
-	p, connection, err := a.authorize(req, in.ConnectionName, "read")
+	p, err := a.principal(req)
 	if err != nil {
 		return nil, searchOutput{}, err
+	}
+	if !p.HasScope("read") {
+		return nil, searchOutput{}, errors.New("read scope is required")
 	}
 
 	query := strings.ToLower(strings.TrimSpace(in.Query))
@@ -333,88 +402,136 @@ func (a *App) search(ctx context.Context, req *mcp.CallToolRequest, in searchInp
 		return nil, searchOutput{Results: []searchResultItem{}}, nil
 	}
 
-	cfg, ok := a.store.ConnectionConfig(connection)
-	if !ok {
-		return nil, searchOutput{}, fmt.Errorf("unknown connection: %s", connection)
-	}
-
-	var results []searchResultItem
+	results := make([]searchResultItem, 0, a.cfg.Server.MaxSearchResults)
 	seen := map[string]bool{}
-
-	for _, schema := range cfg.Schemas {
-		if schema == "*" {
-			schemas, err := a.store.ListSchemas(ctx, connection)
-			if err != nil {
-				continue
-			}
-			for _, s := range schemas {
-				a.searchInSchema(ctx, connection, s, query, seen, &results)
-			}
-		} else {
-			a.searchInSchema(ctx, connection, schema, query, seen, &results)
+	for _, connection := range a.store.ConnectionNames() {
+		if !p.CanUseConnection(connection) {
+			continue
 		}
+		cfg, ok := a.store.ConnectionConfig(connection)
+		if !ok {
+			err := fmt.Errorf("unknown connection: %s", connection)
+			a.audit(p, connection, "search", "", nil, false, int64(len(results)), start, err)
+			return nil, searchOutput{}, err
+		}
+
+		schemas := cfg.Schemas
+		for _, schema := range schemas {
+			if schema == "*" {
+				schemas, err = a.store.ListSchemas(ctx, connection)
+				if err != nil {
+					a.audit(p, connection, "search", "", nil, false, int64(len(results)), start, err)
+					return nil, searchOutput{}, err
+				}
+				break
+			}
+		}
+		for _, schema := range schemas {
+			if len(results) >= a.cfg.Server.MaxSearchResults {
+				break
+			}
+			if err := a.searchInSchema(ctx, connection, schema, query, seen, &results, a.cfg.Server.MaxSearchResults); err != nil {
+				a.audit(p, connection, "search", "", nil, false, int64(len(results)), start, err)
+				return nil, searchOutput{}, err
+			}
+		}
+		a.audit(p, connection, "search", "", nil, true, int64(len(results)), start, nil)
 	}
 
-	a.audit(p, connection, "search", "", nil, true, int64(len(results)), start, nil)
 	return nil, searchOutput{Results: results}, nil
 }
 
-func (a *App) searchInSchema(ctx context.Context, connection, schema, query string, seen map[string]bool, results *[]searchResultItem) {
+func (a *App) searchInSchema(ctx context.Context, connection, schema, query string, seen map[string]bool, results *[]searchResultItem, maxResults int) error {
 	tables, err := a.store.ListTables(ctx, connection, schema)
 	if err != nil {
-		return
+		return err
 	}
 
 	for _, table := range tables {
-		tableID := schema + "." + table.Name
-		title := table.Name
+		if len(*results) >= maxResults {
+			return nil
+		}
+		tableRef := objectReference{Connection: connection, Schema: schema, Table: table.Name}
+		tableID := encodeObjectID(tableRef)
 
 		if strings.Contains(strings.ToLower(table.Name), query) || strings.Contains(strings.ToLower(schema), query) {
 			if !seen[tableID] {
 				seen[tableID] = true
 				*results = append(*results, searchResultItem{
 					ID:    tableID,
-					Title: title,
-					URL:   fmt.Sprintf("postgres://%s/%s/%s", connection, schema, table.Name),
+					Title: objectTitle(tableRef),
+					URL:   a.sourceURL(connection, schema, table.Name, ""),
 				})
 			}
+		}
+		if len(*results) >= maxResults {
+			return nil
 		}
 
 		desc, err := a.store.DescribeTable(ctx, connection, schema, table.Name)
 		if err != nil {
-			continue
+			return err
 		}
 
 		for _, col := range desc.Columns {
-			colID := tableID + "." + col.Name
+			if len(*results) >= maxResults {
+				return nil
+			}
+			colRef := objectReference{Connection: connection, Schema: schema, Table: table.Name, Column: col.Name}
+			colID := encodeObjectID(colRef)
 			if strings.Contains(strings.ToLower(col.Name), query) {
 				if !seen[colID] {
 					seen[colID] = true
 					*results = append(*results, searchResultItem{
 						ID:    colID,
-						Title: table.Name + "." + col.Name,
-						URL:   fmt.Sprintf("postgres://%s/%s/%s#%s", connection, schema, table.Name, col.Name),
+						Title: objectTitle(colRef),
+						URL:   a.sourceURL(connection, schema, table.Name, col.Name),
 					})
 				}
 			}
 		}
 	}
+	return nil
 }
 
 func (a *App) fetch(ctx context.Context, req *mcp.CallToolRequest, in fetchInput) (*mcp.CallToolResult, fetchOutput, error) {
 	start := time.Now()
-	p, connection, err := a.authorize(req, in.ConnectionName, "read")
+	p, err := a.principal(req)
+	if err != nil {
+		return nil, fetchOutput{}, err
+	}
+	if !p.HasScope("read") {
+		return nil, fetchOutput{}, errors.New("read scope is required")
+	}
+
+	ref, err := decodeObjectID(in.ID)
+	if err != nil && !strings.HasPrefix(in.ID, objectIDPrefix) {
+		allowed := make([]string, 0, len(a.store.ConnectionNames()))
+		for _, name := range a.store.ConnectionNames() {
+			if p.CanUseConnection(name) {
+				allowed = append(allowed, name)
+			}
+		}
+		switch len(allowed) {
+		case 1:
+			ref, err = decodeLegacyObjectID(in.ID, allowed[0])
+		case 0:
+			// Preserve the original invalid-ID error when the store has no connections.
+		default:
+			err = errors.New("legacy object ID is ambiguous with multiple connections; call search to obtain a connection-scoped ID")
+		}
+	}
+	if err != nil {
+		return nil, fetchOutput{}, err
+	}
+	var connection string
+	_, connection, err = a.authorize(req, ref.Connection, "read")
 	if err != nil {
 		return nil, fetchOutput{}, err
 	}
 
-	parts := strings.Split(in.ID, ".")
-	if len(parts) < 2 || len(parts) > 3 {
-		return nil, fetchOutput{}, fmt.Errorf("invalid ID format: expected schema.table or schema.table.column, got: %s", in.ID)
-	}
-
-	schema := parts[0]
-	table := parts[1]
+	schema := ref.Schema
+	table := ref.Table
 
 	cfg, ok := a.store.ConnectionConfig(connection)
 	if !ok {
@@ -473,24 +590,24 @@ func (a *App) fetch(ctx context.Context, req *mcp.CallToolRequest, in fetchInput
 	}
 
 	output := fetchOutput{
-		ID:    in.ID,
-		Title: schema + "." + table,
+		ID:    encodeObjectID(ref),
+		Title: objectTitle(ref),
 		Text:  text.String(),
-		URL:   fmt.Sprintf("postgres://%s/%s/%s", connection, schema, table),
+		URL:   a.sourceURL(connection, schema, table, ""),
 		Metadata: map[string]string{
-			"schema":    schema,
-			"table":     table,
+			"schema":     schema,
+			"table":      table,
 			"connection": connection,
 		},
 	}
 
-	if len(parts) == 3 {
-		colName := parts[2]
+	if ref.Column != "" {
+		colName := ref.Column
 		found := false
 		for _, col := range desc.Columns {
 			if col.Name == colName {
-				output.ID = in.ID
-				output.Title = schema + "." + table + "." + colName
+				output.ID = encodeObjectID(ref)
+				output.Title = objectTitle(ref)
 				output.Text = fmt.Sprintf("Column: %s\nType: %s\nNullable: %v\nPrimary Key: %v\n",
 					col.Name, col.Type, col.Nullable, col.IsPrimaryKey)
 				if col.Default != nil {
@@ -499,7 +616,7 @@ func (a *App) fetch(ctx context.Context, req *mcp.CallToolRequest, in fetchInput
 				if col.Comment != nil {
 					output.Text += fmt.Sprintf("Comment: %s\n", *col.Comment)
 				}
-				output.URL = fmt.Sprintf("postgres://%s/%s/%s#%s", connection, schema, table, colName)
+				output.URL = a.sourceURL(connection, schema, table, colName)
 				output.Metadata["column"] = colName
 				found = true
 				break
@@ -512,6 +629,79 @@ func (a *App) fetch(ctx context.Context, req *mcp.CallToolRequest, in fetchInput
 
 	a.audit(p, connection, "fetch", "", []string{schema + "." + table}, true, 0, start, nil)
 	return nil, output, nil
+}
+
+func (a *App) sourceHTTPHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/sources" && r.URL.Path != "/sources/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	query := r.URL.Query()
+	signed := a.validCitationURL(query)
+	var p authn.Principal
+	var authenticated bool
+	if a.auth != nil {
+		p, authenticated = a.auth.AuthenticateHeader(r.Header.Get("Authorization"))
+	}
+	if !signed && (!authenticated || !p.HasScope("read")) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="postgres-mcp"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	connection := query.Get("connection")
+	schema := query.Get("schema")
+	table := query.Get("table")
+	column := query.Get("column")
+	if connection == "" || schema == "" || table == "" || (!signed && !p.CanUseConnection(connection)) {
+		http.Error(w, "invalid or unauthorized source", http.StatusNotFound)
+		return
+	}
+	cfg, ok := a.store.ConnectionConfig(connection)
+	if !ok || !cfg.SchemaAllowed(schema) {
+		http.Error(w, "source not found", http.StatusNotFound)
+		return
+	}
+	desc, err := a.store.DescribeTable(r.Context(), connection, schema, table)
+	if err != nil {
+		http.Error(w, "source not found", http.StatusNotFound)
+		return
+	}
+	if column != "" {
+		found := false
+		for _, item := range desc.Columns {
+			if item.Name == column {
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, "source not found", http.StatusNotFound)
+			return
+		}
+	}
+
+	ref := objectReference{Connection: connection, Schema: schema, Table: table, Column: column}
+	id := encodeObjectID(ref)
+	title := objectTitle(ref)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		`id`:          id,
+		`title`:       title,
+		`url`:         a.sourceURL(connection, schema, table, column),
+		`connection`:  connection,
+		`schema`:      schema,
+		`table`:       table,
+		`column`:      column,
+		`description`: desc,
+	})
 }
 
 func (a *App) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -557,7 +747,17 @@ func (a *App) readResource(ctx context.Context, req *mcp.ReadResourceRequest) (*
 		if !ok {
 			return nil, mcp.ResourceNotFoundError(uri)
 		}
-		for _, schema := range cfg.Schemas {
+		schemas := cfg.Schemas
+		for _, schema := range schemas {
+			if schema == "*" {
+				schemas, err = a.store.ListSchemas(ctx, connection)
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+		for _, schema := range schemas {
 			tables, err := a.store.ListTables(ctx, connection, schema)
 			if err != nil {
 				return nil, err
@@ -658,6 +858,59 @@ func resourceJSON(uri string, value any) (*mcp.ReadResourceResult, error) {
 		MIMEType: "application/json",
 		Text:     string(data),
 	}}}, nil
+}
+
+func (a *App) sourceURL(connection, schema, table, column string) string {
+	base, err := url.Parse(a.cfg.Server.PublicBaseURL)
+	if err != nil {
+		return ""
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + "/sources"
+	values := base.Query()
+	values.Set("connection", connection)
+	values.Set("schema", schema)
+	values.Set("table", table)
+	if column != "" {
+		values.Set("column", column)
+	}
+	if a.cfg.Server.CitationSigningKey != "" {
+		values.Set("expires", fmt.Sprintf("%d", time.Now().Add(a.cfg.Server.CitationTTLDuration()).Unix()))
+		values.Set("signature", a.citationSignature(values))
+	}
+	base.RawQuery = values.Encode()
+	return base.String()
+}
+
+func (a *App) citationSignature(values url.Values) string {
+	canonical := url.Values{}
+	for _, key := range []string{"connection", "schema", "table", "column", "expires"} {
+		if value := values.Get(key); value != "" {
+			canonical.Set(key, value)
+		}
+	}
+	mac := hmac.New(sha256.New, []byte(a.cfg.Server.CitationSigningKey))
+	_, _ = mac.Write([]byte(canonical.Encode()))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (a *App) validCitationURL(values url.Values) bool {
+	if a.cfg == nil || a.cfg.Server.CitationSigningKey == "" || values.Get("signature") == "" {
+		return false
+	}
+	expires, err := strconv.ParseInt(values.Get("expires"), 10, 64)
+	if err != nil || expires < time.Now().Unix() {
+		return false
+	}
+	expected := a.citationSignature(values)
+	provided, err := base64.RawURLEncoding.DecodeString(values.Get("signature"))
+	if err != nil {
+		return false
+	}
+	expectedBytes, err := base64.RawURLEncoding.DecodeString(expected)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(provided, expectedBytes)
 }
 
 func fingerprint(sql string) string {

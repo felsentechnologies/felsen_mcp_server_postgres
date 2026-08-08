@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,8 +38,11 @@ func NewStore(ctx context.Context, cfg *config.Config) (*Store, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
+		poolCfg.MinConns = int32(connCfg.MinConns)
+		poolCfg.MaxConns = int32(connCfg.MaxConns)
 		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
+			store.Close()
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		pingCtx, cancel := context.WithTimeout(ctx, connCfg.QueryTimeoutDuration())
@@ -46,11 +50,13 @@ func NewStore(ctx context.Context, cfg *config.Config) (*Store, error) {
 		cancel()
 		if err != nil {
 			pool.Close()
+			store.Close()
 			return nil, fmt.Errorf("%s ping: %w", name, err)
 		}
 		masker, err := masking.New(connCfg.Masking)
 		if err != nil {
 			pool.Close()
+			store.Close()
 			return nil, fmt.Errorf("%s masking: %w", name, err)
 		}
 		store.conns[name] = &database{cfg: connCfg, pool: pool, masker: masker, cache: map[string]TableDescription{}}
@@ -69,7 +75,21 @@ func (s *Store) ConnectionNames() []string {
 	for name := range s.conns {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
+}
+
+func (s *Store) Health(ctx context.Context) error {
+	for _, name := range s.ConnectionNames() {
+		db := s.conns[name]
+		pingCtx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
+		err := db.pool.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("%s ping: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) ConnectionConfig(name string) (config.ConnectionConfig, bool) {
@@ -93,7 +113,7 @@ func (s *Store) ListSchemas(ctx context.Context, connection string) ([]string, e
 		return nil, err
 	}
 	defer rows.Close()
-	var schemas []string
+	schemas := make([]string, 0)
 	for rows.Next() {
 		var schema string
 		if err := rows.Scan(&schema); err != nil {
@@ -111,6 +131,16 @@ func (s *Store) SchemaSummary(ctx context.Context, connection string) (SchemaSum
 	if err != nil {
 		return SchemaSummary{}, err
 	}
+	schemas := db.cfg.Schemas
+	for _, schema := range schemas {
+		if schema == "*" {
+			schemas, err = s.ListSchemas(ctx, connection)
+			if err != nil {
+				return SchemaSummary{}, err
+			}
+			break
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
 	defer cancel()
 
@@ -120,12 +150,12 @@ func (s *Store) SchemaSummary(ctx context.Context, connection string) (SchemaSum
 		where table_schema = any($1)
 		group by table_schema
 		order by table_schema
-	`, db.cfg.Schemas)
+	`, schemas)
 	if err != nil {
 		return SchemaSummary{}, err
 	}
 	defer rows.Close()
-	summary := SchemaSummary{Connection: connection, IntrospectedAt: time.Now().UTC().Format(time.RFC3339)}
+	summary := SchemaSummary{Connection: connection, Schemas: make([]SchemaCount, 0), IntrospectedAt: time.Now().UTC().Format(time.RFC3339)}
 	for rows.Next() {
 		var item SchemaCount
 		if err := rows.Scan(&item.Name, &item.TableCount); err != nil {
@@ -157,7 +187,7 @@ func (s *Store) ListTables(ctx context.Context, connection, schema string) ([]Ta
 		return nil, err
 	}
 	defer rows.Close()
-	var tables []TableInfo
+	tables := make([]TableInfo, 0)
 	for rows.Next() {
 		var table TableInfo
 		if err := rows.Scan(&table.Schema, &table.Name, &table.Type); err != nil {
@@ -187,7 +217,14 @@ func (s *Store) DescribeTable(ctx context.Context, connection, schema, table str
 	ctx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
 	defer cancel()
 
-	desc := TableDescription{Schema: schema, Table: table}
+	desc := TableDescription{
+		Schema:      schema,
+		Table:       table,
+		Columns:     make([]ColumnInfo, 0),
+		PrimaryKey:  make([]string, 0),
+		ForeignKeys: make([]ForeignKeyInfo, 0),
+		Indexes:     make([]IndexInfo, 0),
+	}
 	pk, err := db.primaryKey(ctx, schema, table)
 	if err != nil {
 		return TableDescription{}, err
@@ -231,7 +268,7 @@ func (s *Store) SampleRows(ctx context.Context, connection, schema, table string
 		limit = db.cfg.MaxRows
 	}
 	sql := "select * from " + pgx.Identifier{schema, table}.Sanitize() + " limit $1"
-	return db.query(ctx, sql, limit)
+	return db.queryReadOnly(ctx, sql, limit)
 }
 
 func (s *Store) ExecuteSQL(ctx context.Context, connection, sql string) (QueryResult, sqlguard.ValidationResult, error) {
@@ -244,7 +281,7 @@ func (s *Store) ExecuteSQL(ctx context.Context, connection, sql string) (QueryRe
 		return QueryResult{}, validation, errors.New(validation.Reason)
 	}
 	sql = sqlguard.ApplySelectLimit(sql, db.cfg.MaxRows)
-	result, err := db.query(ctx, sql)
+	result, err := db.queryReadOnly(ctx, sql)
 	return result, validation, err
 }
 
@@ -259,11 +296,28 @@ func (s *Store) ExecuteDML(ctx context.Context, connection, sql string) (DMLResu
 	}
 	ctx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
 	defer cancel()
-	tag, err := db.pool.Exec(ctx, sql)
+	tx, err := db.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return DMLResult{}, validation, err
 	}
-	return DMLResult{RowsAffected: tag.RowsAffected()}, validation, nil
+	if err := db.setScopedSearchPath(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return DMLResult{}, validation, err
+	}
+	tag, err := tx.Exec(ctx, sql)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return DMLResult{}, validation, err
+	}
+	result := DMLResult{RowsAffected: tag.RowsAffected()}
+	if result.RowsAffected > int64(db.cfg.MaxAffectedRows) {
+		_ = tx.Rollback(ctx)
+		return result, validation, fmt.Errorf("DML affected %d rows, exceeding max_affected_rows=%d; transaction rolled back", result.RowsAffected, db.cfg.MaxAffectedRows)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return result, validation, err
+	}
+	return result, validation, nil
 }
 
 func (s *Store) ExplainSQL(ctx context.Context, connection, sql string) (QueryResult, sqlguard.ValidationResult, error) {
@@ -275,7 +329,7 @@ func (s *Store) ExplainSQL(ctx context.Context, connection, sql string) (QueryRe
 	if !validation.Valid {
 		return QueryResult{}, validation, errors.New(validation.Reason)
 	}
-	result, err := db.query(ctx, "explain (format json) "+strings.TrimRight(strings.TrimSpace(sql), ";"))
+	result, err := db.queryReadOnly(ctx, "explain (format json) "+strings.TrimRight(strings.TrimSpace(sql), ";"))
 	return result, validation, err
 }
 
@@ -290,8 +344,20 @@ func (s *Store) ExecuteDDL(ctx context.Context, connection, sql string) (DDLResu
 	}
 	ctx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
 	defer cancel()
-	_, err = db.pool.Exec(ctx, sql)
+	tx, err := db.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
+		return DDLResult{}, validation, err
+	}
+	if err := db.setScopedSearchPath(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return DDLResult{}, validation, err
+	}
+	_, err = tx.Exec(ctx, sql)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return DDLResult{}, validation, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return DDLResult{}, validation, err
 	}
 	op := validation.Operation
@@ -301,9 +367,9 @@ func (s *Store) ExecuteDDL(ctx context.Context, connection, sql string) (DDLResu
 		msg += " on " + strings.Join(tables, ", ")
 	}
 	db.mu.Lock()
-	for _, t := range tables {
-		delete(db.cache, t)
-	}
+	// DDL can change dependent metadata (for example DROP INDEX changes the
+	// cached description of its parent table), so invalidate the whole cache.
+	db.cache = map[string]TableDescription{}
 	db.mu.Unlock()
 	return DDLResult{Message: msg}, validation, nil
 }
@@ -342,7 +408,7 @@ func (db *database) columns(ctx context.Context, schema, table string, pk map[st
 		return nil, err
 	}
 	defer rows.Close()
-	var columns []ColumnInfo
+	columns := make([]ColumnInfo, 0)
 	for rows.Next() {
 		var col ColumnInfo
 		if err := rows.Scan(&col.Name, &col.Type, &col.Nullable, &col.Default, &col.Comment); err != nil {
@@ -372,7 +438,7 @@ func (db *database) primaryKey(ctx context.Context, schema, table string) ([]str
 		return nil, err
 	}
 	defer rows.Close()
-	var pk []string
+	pk := make([]string, 0)
 	for rows.Next() {
 		var col string
 		if err := rows.Scan(&col); err != nil {
@@ -406,7 +472,7 @@ func (db *database) foreignKeys(ctx context.Context, schema, table string) ([]Fo
 		return nil, err
 	}
 	defer rows.Close()
-	var fks []ForeignKeyInfo
+	fks := make([]ForeignKeyInfo, 0)
 	for rows.Next() {
 		var fk ForeignKeyInfo
 		if err := rows.Scan(&fk.Name, &fk.Column, &fk.ForeignSchema, &fk.ForeignTable, &fk.ForeignColumn); err != nil {
@@ -433,7 +499,7 @@ func (db *database) indexes(ctx context.Context, schema, table string) ([]IndexI
 		return nil, err
 	}
 	defer rows.Close()
-	var indexes []IndexInfo
+	indexes := make([]IndexInfo, 0)
 	for rows.Next() {
 		var idx IndexInfo
 		if err := rows.Scan(&idx.Name, &idx.Unique, &idx.Definition); err != nil {
@@ -452,15 +518,64 @@ func (db *database) query(ctx context.Context, sql string, args ...any) (QueryRe
 	if err != nil {
 		return QueryResult{}, err
 	}
-	defer rows.Close()
+	return db.collectRows(rows)
+}
 
+func (db *database) queryReadOnly(ctx context.Context, sql string, args ...any) (QueryResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, db.cfg.QueryTimeoutDuration())
+	defer cancel()
+	tx, err := db.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return QueryResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := db.setScopedSearchPath(ctx, tx); err != nil {
+		return QueryResult{}, err
+	}
+
+	rows, err := tx.Query(ctx, sql, args...)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	result, err := db.collectRows(rows)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return QueryResult{}, err
+	}
+	return result, nil
+}
+
+func (db *database) setScopedSearchPath(ctx context.Context, tx pgx.Tx) error {
+	if len(db.cfg.Schemas) == 0 {
+		return nil
+	}
+	for _, schema := range db.cfg.Schemas {
+		if schema == "*" {
+			return nil
+		}
+	}
+	parts := make([]string, 0, len(db.cfg.Schemas))
+	for _, schema := range db.cfg.Schemas {
+		parts = append(parts, pgx.Identifier{schema}.Sanitize())
+	}
+	_, err := tx.Exec(ctx, "select set_config('search_path', $1, true)", strings.Join(parts, ","))
+	return err
+}
+
+func (db *database) collectRows(rows pgx.Rows) (QueryResult, error) {
+	defer rows.Close()
 	fields := rows.FieldDescriptions()
 	columns := make([]string, len(fields))
 	for i, field := range fields {
 		columns[i] = field.Name
 	}
-	result := QueryResult{Columns: columns}
+	result := QueryResult{Columns: columns, Rows: make([][]any, 0)}
 	for rows.Next() {
+		if len(result.Rows) >= db.cfg.MaxRows {
+			break
+		}
 		values, err := rows.Values()
 		if err != nil {
 			return QueryResult{}, err

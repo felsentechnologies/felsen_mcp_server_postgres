@@ -2,32 +2,36 @@ server:
   host: 0.0.0.0
   port: 8080
   endpoint: /mcp
+  public_base_url:
+  citation_signing_key_env: MCP_CITATION_SIGNING_KEY
+  citation_ttl: 15m
   query_timeout: 30s
   session_timeout: 30m
-  max_rows: 500
+  max_rows: 100
+  max_search_results: 100
+  max_body_bytes: 1048576
+  max_concurrent_requests: 64
   json_response: true
   stateless: true
 
 auth:
   api_keys:
-    - name: admin
+    - name: reader
       token_env: MCP_API_KEY
-      scopes: [admin]
+      scopes: [read]
       connections: [default]
 
 connections:
   default:
     dsn_env: DATABASE_URL
-    schemas: ["*"]
-    max_rows: 500
+    schemas: [public]
+    max_rows: 100
+    max_affected_rows: 100
+    max_conns: 8
     query_timeout: 30s
-    ddl_enabled: true
+    ddl_enabled: false
     masking:
-      enabled: false
-    dml_policies:
-      - schema: "*"
-        table: "*"
-        operations: [insert, update, delete]
+      enabled: true
 
 audit:
   destination: stdout

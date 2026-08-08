@@ -2,10 +2,12 @@ package audit
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/config"
@@ -27,6 +29,7 @@ type Event struct {
 type Auditor struct {
 	out    io.WriteCloser
 	logger *slog.Logger
+	mu     sync.Mutex
 }
 
 func New(cfg config.AuditConfig, logger *slog.Logger) (*Auditor, error) {
@@ -40,7 +43,7 @@ func New(cfg config.AuditConfig, logger *slog.Logger) (*Auditor, error) {
 		}
 		return &Auditor{out: f, logger: logger}, nil
 	default:
-		return &Auditor{out: nopCloser{io.Discard}, logger: logger}, nil
+		return nil, fmt.Errorf("unsupported audit destination %q", cfg.Destination)
 	}
 }
 
@@ -48,6 +51,8 @@ func (a *Auditor) Record(event Event) {
 	if a == nil || a.out == nil {
 		return
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	event.Timestamp = time.Now().UTC()
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -56,13 +61,17 @@ func (a *Auditor) Record(event Event) {
 		}
 		return
 	}
-	_, _ = a.out.Write(append(data, '\n'))
+	if _, err := a.out.Write(append(data, '\n')); err != nil && a.logger != nil {
+		a.logger.Error("audit write failed", "error", err)
+	}
 }
 
 func (a *Auditor) Close() error {
 	if a == nil || a.out == nil {
 		return nil
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.out.Close()
 }
 

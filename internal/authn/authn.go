@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -39,6 +40,10 @@ func NewManager(cfg config.AuthConfig) (*Manager, error) {
 			}
 			sum := sha256.Sum256([]byte(key.Token))
 			hash = hex.EncodeToString(sum[:])
+		} else if len(hash) != sha256.Size*2 {
+			return nil, errors.New("api key token_sha256 must be 64 hexadecimal characters")
+		} else if _, err := hex.DecodeString(hash); err != nil {
+			return nil, errors.New("api key token_sha256 must be hexadecimal")
 		}
 		p := Principal{
 			Name:        key.Name,
@@ -61,9 +66,10 @@ func NewManager(cfg config.AuthConfig) (*Manager, error) {
 
 func (m *Manager) AuthenticateHeader(header string) (Principal, bool) {
 	token := strings.TrimSpace(header)
-	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
-		token = strings.TrimSpace(token[7:])
+	if len(token) < len("Bearer ") || !strings.EqualFold(token[:len("Bearer ")], "Bearer ") {
+		return Principal{}, false
 	}
+	token = strings.TrimSpace(token[len("Bearer "):])
 	if token == "" {
 		return Principal{}, false
 	}
@@ -86,13 +92,23 @@ func (p Principal) CanUseConnection(name string) bool {
 }
 
 func HTTPMiddleware(manager *Manager, next http.Handler) http.Handler {
+	return HTTPMiddlewareWithLogger(manager, next, nil)
+}
+
+func HTTPMiddlewareWithLogger(manager *Manager, next http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			next.ServeHTTP(w, r)
+		if manager == nil {
+			if logger != nil {
+				logger.Error("authentication manager is not configured")
+			}
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if _, ok := manager.AuthenticateHeader(r.Header.Get("Authorization")); !ok {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="postgres-mcp"`)
+			if logger != nil {
+				logger.Warn("unauthorized HTTP request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			}
+			w.Header().Set("WWW-Authenticate", "Bearer realm=\"postgres-mcp\"")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

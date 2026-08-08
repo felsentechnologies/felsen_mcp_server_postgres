@@ -4,6 +4,12 @@ param(
     [int]$HostPort = 8080,
     [string]$DatabaseUrl = "",
     [string]$McpApiKey = "",
+    [string]$CitationSigningKey = "",
+    [string]$PublicBaseUrl = "",
+    [int]$PostgresPort = 5432,
+    [string]$PostgresDb = "",
+    [string]$PostgresUser = "",
+    [string]$PostgresPassword = "",
     [string]$ImageTag = "latest",
     [string]$ComposeFile = "",
     [string]$ConfigPath = ""
@@ -17,12 +23,22 @@ if ([string]::IsNullOrWhiteSpace($ComposeFile)) {
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = "/app/Docker/config.docker.yaml"
 }
+$PublicBaseUrlWasProvided = -not [string]::IsNullOrWhiteSpace($PublicBaseUrl)
+if ([string]::IsNullOrWhiteSpace($PublicBaseUrl)) {
+    $PublicBaseUrl = "http://localhost:$HostPort"
+}
 $Dockerfile = Join-Path $ProjectRoot "Docker\Dockerfile"
 $EnvFile = Join-Path $ProjectRoot ".env"
 $EnvExampleFile = Join-Path $ProjectRoot ".env.example"
+$VersionFile = Join-Path $ProjectRoot "VERSION"
 $LastComposeSucceeded = $false
+$HostPortWasProvided = $PSBoundParameters.ContainsKey("HostPort")
+$PostgresPortWasProvided = $PSBoundParameters.ContainsKey("PostgresPort")
+$ImageNameWasProvided = $PSBoundParameters.ContainsKey("ImageName")
+$ImageTagWasProvided = $PSBoundParameters.ContainsKey("ImageTag")
 $DatabaseUrlWasProvided = -not [string]::IsNullOrWhiteSpace($DatabaseUrl)
 $McpApiKeyWasProvided = -not [string]::IsNullOrWhiteSpace($McpApiKey)
+$CitationSigningKeyWasProvided = -not [string]::IsNullOrWhiteSpace($CitationSigningKey)
 
 function Write-Title {
     param([string]$Text)
@@ -39,6 +55,34 @@ function Write-FelsenBanner {
     Write-Host " |_|  \___||_|___/\___|_| |_|   \_/\___|\___|_| |_|_| |_|\___/|_|\___/ \__, |_|\___||___/" -ForegroundColor Cyan
     Write-Host "                                                                        __/ |             " -ForegroundColor Cyan
     Write-Host "                                                                       |___/              " -ForegroundColor Cyan
+}
+
+function Get-ProjectVersion {
+    if (-not (Test-Path -LiteralPath $VersionFile)) {
+        throw "Arquivo VERSION nao encontrado: $VersionFile"
+    }
+
+    $version = (Get-Content -LiteralPath $VersionFile -Raw).Trim()
+    if ($version -notmatch '^\d+\.\d+\.\d+$') {
+        throw "VERSION deve conter uma versao SemVer estavel no formato X.Y.Z. Valor atual: '$version'"
+    }
+    return $version
+}
+
+function Get-GitCommit {
+    try {
+        $commit = (& git -C $ProjectRoot rev-parse --short=12 HEAD 2>$null).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($commit)) {
+            return $commit
+        }
+    }
+    catch {
+    }
+    return "unknown"
+}
+
+function Get-BuildDate {
+    return (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 }
 
 function Test-Docker {
@@ -121,8 +165,17 @@ function Sync-DevEnv {
     Initialize-EnvFile
     $values = Read-EnvValues
 
-    if (-not $PSBoundParameters.ContainsKey("HostPort") -and $values.ContainsKey("HTTP_PORT") -and $values["HTTP_PORT"] -match "^\d+$") {
+    if (-not $HostPortWasProvided -and $values.ContainsKey("HTTP_PORT") -and $values["HTTP_PORT"] -match "^\d+$") {
         $script:HostPort = [int]$values["HTTP_PORT"]
+    }
+    if (-not $PostgresPortWasProvided -and $values.ContainsKey("POSTGRES_PORT") -and $values["POSTGRES_PORT"] -match "^\d+$") {
+        $script:PostgresPort = [int]$values["POSTGRES_PORT"]
+    }
+    if (-not $ImageNameWasProvided -and $values.ContainsKey("IMAGE_NAME") -and -not [string]::IsNullOrWhiteSpace($values["IMAGE_NAME"])) {
+        $script:ImageName = $values["IMAGE_NAME"]
+    }
+    if (-not $ImageTagWasProvided -and $values.ContainsKey("IMAGE_TAG") -and -not [string]::IsNullOrWhiteSpace($values["IMAGE_TAG"])) {
+        $script:ImageTag = $values["IMAGE_TAG"]
     }
 
     if (-not $DatabaseUrlWasProvided) {
@@ -131,12 +184,46 @@ function Sync-DevEnv {
         }
     }
 
+    if ([string]::IsNullOrWhiteSpace($PostgresDb) -and $values.ContainsKey("POSTGRES_DB")) {
+        $script:PostgresDb = $values["POSTGRES_DB"]
+    }
+    if ([string]::IsNullOrWhiteSpace($PostgresUser) -and $values.ContainsKey("POSTGRES_USER")) {
+        $script:PostgresUser = $values["POSTGRES_USER"]
+    }
+    if ([string]::IsNullOrWhiteSpace($PostgresPassword) -and $values.ContainsKey("POSTGRES_PASSWORD")) {
+        $script:PostgresPassword = $values["POSTGRES_PASSWORD"]
+    }
+
     if (-not $McpApiKeyWasProvided) {
         if ($values.ContainsKey("MCP_API_KEY") -and -not [string]::IsNullOrWhiteSpace($values["MCP_API_KEY"])) {
             $script:McpApiKey = $values["MCP_API_KEY"]
         }
         else {
             $script:McpApiKey = New-DevSecret 32
+        }
+        if ($script:McpApiKey -match "(?i)^(change-me|replace-with|your-)") {
+            $script:McpApiKey = New-DevSecret 32
+        }
+    }
+
+    if (-not $CitationSigningKeyWasProvided) {
+        if ($values.ContainsKey("MCP_CITATION_SIGNING_KEY") -and -not [string]::IsNullOrWhiteSpace($values["MCP_CITATION_SIGNING_KEY"])) {
+            $script:CitationSigningKey = $values["MCP_CITATION_SIGNING_KEY"]
+        }
+        else {
+            $script:CitationSigningKey = New-DevSecret 32
+        }
+        if ($script:CitationSigningKey -match "(?i)^(change-me|replace-with|your-)") {
+            $script:CitationSigningKey = New-DevSecret 32
+        }
+    }
+
+    if (-not $PublicBaseUrlWasProvided) {
+        if ($values.ContainsKey("MCP_PUBLIC_BASE_URL") -and -not [string]::IsNullOrWhiteSpace($values["MCP_PUBLIC_BASE_URL"])) {
+            $script:PublicBaseUrl = $values["MCP_PUBLIC_BASE_URL"]
+        }
+        else {
+            $script:PublicBaseUrl = "http://localhost:$HostPort"
         }
     }
 
@@ -159,17 +246,19 @@ function Save-EnvFile {
     $lines += ""
     $lines += "POSTGRES_MCP_CONFIG=$ConfigPath"
     $lines += "DATABASE_URL=$DatabaseUrl"
+    $lines += "POSTGRES_DB=$PostgresDb"
+    $lines += "POSTGRES_USER=$PostgresUser"
+    $lines += "POSTGRES_PASSWORD=$PostgresPassword"
+    $lines += "POSTGRES_PORT=$PostgresPort"
     $lines += "MCP_API_KEY=$McpApiKey"
-    $lines += "MCP_WRITER_API_KEY=$McpApiKey"
-    $lines += "MCP_DDL_API_KEY=$McpApiKey"
-    $lines += "POSTGRES_MCP_API_KEY=$McpApiKey"
+    $lines += "MCP_CITATION_SIGNING_KEY=$CitationSigningKey"
+    $lines += "MCP_PUBLIC_BASE_URL=$PublicBaseUrl"
+    $lines += "MCP_VERSION=$(Get-ProjectVersion)"
     $lines += "HTTP_PORT=$HostPort"
     $lines += "MCP_PORT=$HostPort"
     $lines += "POSTGRES_MCP_PORT=$HostPort"
     $lines += "IMAGE_NAME=$ImageName"
-    $lines += "HTTP_BEARER_TOKEN=$McpApiKey"
-    $lines += "MCP_BEARER_TOKEN=$McpApiKey"
-    $lines += "MCP_ALLOWED_ORIGINS="
+    $lines += "IMAGE_TAG=$ImageTag"
     $lines += ""
 
     Set-Content -LiteralPath $EnvFile -Value ($lines -join "`n") -NoNewline
@@ -179,9 +268,34 @@ function Save-EnvFile {
 function Sync-Env {
     Sync-DevEnv
 
-    if ([string]::IsNullOrWhiteSpace($DatabaseUrl)) {
-        $script:DatabaseUrl = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+    if ($HostPort -lt 1 -or $HostPort -gt 65535) {
+        throw "HostPort must be between 1 and 65535."
     }
+    if ($PostgresPort -lt 1 -or $PostgresPort -gt 65535) {
+        throw "PostgresPort must be between 1 and 65535."
+    }
+    if ([string]::IsNullOrWhiteSpace($DatabaseUrl)) {
+        throw "DATABASE_URL is required. Pass -DatabaseUrl or configure it in .env."
+    }
+    if ($DatabaseUrl -match "(?i)(change-me|replace-with|your-)") {
+        throw "DATABASE_URL still contains a placeholder. Replace it before starting the stack."
+    }
+    foreach ($item in @(
+        @{ Name = "POSTGRES_DB"; Value = $PostgresDb },
+        @{ Name = "POSTGRES_USER"; Value = $PostgresUser },
+        @{ Name = "POSTGRES_PASSWORD"; Value = $PostgresPassword }
+    )) {
+        if ([string]::IsNullOrWhiteSpace($item.Value) -or $item.Value -match "(?i)(change-me|replace-with|your-)") {
+            throw "$($item.Name) is required and cannot be a placeholder."
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($McpApiKey) -or $McpApiKey.Length -lt 32 -or $McpApiKey -match "(?i)(change-me|replace-with|your-|secret|password)" ) {
+        throw "MCP_API_KEY is required, must have at least 32 characters, and cannot be a placeholder."
+    }
+    if ([string]::IsNullOrWhiteSpace($CitationSigningKey) -or $CitationSigningKey.Length -lt 32 -or $CitationSigningKey -match "(?i)(change-me|replace-with|your-)" ) {
+        throw "MCP_CITATION_SIGNING_KEY is required, must have at least 32 characters, and cannot be a placeholder."
+    }
+    [void](Get-ProjectVersion)
 }
 
 function Enable-WindowsFirewallPorts {
@@ -222,18 +336,22 @@ function Set-ComposeEnvironment {
 
     $env:COMPOSE_PROJECT_NAME = $ProjectName
     $env:IMAGE_NAME = $ImageName
+    $env:IMAGE_TAG = $ImageTag
     $env:HTTP_PORT = "$HostPort"
     $env:MCP_PORT = "$HostPort"
     $env:POSTGRES_MCP_PORT = "$HostPort"
+    $env:POSTGRES_PORT = "$PostgresPort"
     $env:POSTGRES_MCP_CONFIG = $ConfigPath
     $env:DATABASE_URL = $DatabaseUrl
+    $env:POSTGRES_DB = $PostgresDb
+    $env:POSTGRES_USER = $PostgresUser
+    $env:POSTGRES_PASSWORD = $PostgresPassword
     $env:MCP_API_KEY = $McpApiKey
-    $env:MCP_WRITER_API_KEY = $McpApiKey
-    $env:MCP_DDL_API_KEY = $McpApiKey
-    $env:POSTGRES_MCP_API_KEY = $McpApiKey
-    $env:HTTP_BEARER_TOKEN = $McpApiKey
-    $env:MCP_BEARER_TOKEN = $McpApiKey
-    $env:MCP_ALLOWED_ORIGINS = ""
+    $env:MCP_CITATION_SIGNING_KEY = $CitationSigningKey
+    $env:MCP_PUBLIC_BASE_URL = $PublicBaseUrl
+    $env:MCP_VERSION = Get-ProjectVersion
+    $env:MCP_COMMIT = Get-GitCommit
+    $env:MCP_BUILD_DATE = Get-BuildDate
 }
 
 function Invoke-Compose {
@@ -241,6 +359,9 @@ function Invoke-Compose {
 
     $script:LastComposeSucceeded = $false
     if (-not (Test-Docker)) { return }
+    if (-not (Test-Path -LiteralPath $ComposeFile)) {
+        throw "Arquivo Compose nao encontrado: $ComposeFile"
+    }
 
     Initialize-EnvFile
     Set-ComposeEnvironment
@@ -264,16 +385,75 @@ function Invoke-ImageBuild {
     if (-not (Test-Path -LiteralPath $Dockerfile)) {
         throw "Dockerfile nao encontrado: $Dockerfile"
     }
+    Sync-Env
+    $buildArgs = @(
+        "--build-arg", "VERSION_OVERRIDE=$(Get-ProjectVersion)",
+        "--build-arg", "BUILD_COMMIT=$(Get-GitCommit)",
+        "--build-arg", "BUILD_DATE=$(Get-BuildDate)"
+    )
 
     Push-Location $ProjectRoot
     try {
-        & docker build -f $Dockerfile -t "$ImageName`:$ImageTag" .
+        & docker build -f $Dockerfile @buildArgs -t "$ImageName`:$ImageTag" .
         if ($LASTEXITCODE -ne 0) {
             throw "docker build falhou com codigo de saida $LASTEXITCODE"
         }
     }
     finally {
         Pop-Location
+    }
+}
+
+function Show-Version {
+    Write-Title "Versao do projeto"
+    $version = Get-ProjectVersion
+    Write-Host "Versao:       $version" -ForegroundColor Green
+    Write-Host "Git commit:   $(Get-GitCommit)" -ForegroundColor Green
+    Write-Host "Build UTC:    $(Get-BuildDate)" -ForegroundColor Green
+    Write-Host "Tag esperada: v$version" -ForegroundColor Green
+}
+
+function New-ProjectTag {
+    param([switch]$Push)
+
+    $version = Get-ProjectVersion
+    $tag = "v$version"
+    $head = (& git -C $ProjectRoot rev-parse HEAD 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($head)) {
+        throw "Nao foi possivel determinar o commit atual."
+    }
+
+    $status = (& git -C $ProjectRoot status --porcelain 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Nao foi possivel verificar o estado do repositorio."
+    }
+    if (-not [string]::IsNullOrWhiteSpace(($status -join "`n"))) {
+        throw "Crie o commit da release antes de criar a tag $tag; o working tree possui alteracoes."
+    }
+
+    $existing = (& git -C $ProjectRoot rev-list -n 1 $tag 2>$null).Trim()
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($existing)) {
+        if ($existing -eq $head) {
+            Write-Host "A tag $tag ja aponta para o commit atual." -ForegroundColor Yellow
+        }
+        else {
+            throw "A tag $tag ja existe em outro commit ($existing). Atualize VERSION antes de criar outra release."
+        }
+    }
+    else {
+        & git -C $ProjectRoot tag --annotate $tag --message "Release $tag" $head
+        if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao criar a tag $tag."
+        }
+        Write-Host "Tag criada: $tag" -ForegroundColor Green
+    }
+
+    if ($Push) {
+        & git -C $ProjectRoot push origin $tag
+        if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao enviar a tag $tag para origin."
+        }
+        Write-Host "Tag enviada para origin: $tag" -ForegroundColor Green
     }
 }
 
@@ -509,16 +689,18 @@ function Write-StackInfo {
     Sync-Env
     Write-Host ""
     Write-Host "Stack iniciada." -ForegroundColor Green
-    Write-Host "Postgres:     postgres://localhost:5432/${POSTGRES_DB:-mcp}" -ForegroundColor Green
+    Write-Host "Version:      $(Get-ProjectVersion)" -ForegroundColor Green
+    Write-Host "Postgres:     configured by DATABASE_URL" -ForegroundColor Green
+    Write-Host "Public URL:   $PublicBaseUrl" -ForegroundColor Green
     Write-Host "MCP Endpoint: http://localhost:$HostPort/mcp" -ForegroundColor Green
     Write-Host "Health:       http://localhost:$HostPort/healthz" -ForegroundColor Green
-    Write-Host "API Key:      $McpApiKey" -ForegroundColor Yellow
+    Write-Host "API Key:      configured" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Use este token como Authorization: Bearer <token>" -ForegroundColor Yellow
 }
 
 function Show-Menu {
-    Sync-Env
+    Sync-DevEnv
     Clear-Host
     Write-FelsenBanner
     Write-Host ""
@@ -530,7 +712,7 @@ function Show-Menu {
     Write-Host "Env:           $EnvFile"
     Write-Host "Imagem:        $ImageName`:$ImageTag"
     Write-Host "Porta MCP:     $HostPort"
-    Write-Host "Porta PG:      5432"
+    Write-Host "Porta PG:      $PostgresPort"
     Write-Host "API Key:       $(if ($McpApiKey) { 'configurado' } else { 'sera gerada' })"
     Write-Host ""
     Write-Host "1. Buildar imagem Docker"
@@ -550,6 +732,8 @@ function Show-Menu {
     Write-Host "15. Liberar portas no Firewall"
     Write-Host "16. Remover stack e volumes"
     Write-Host "17. Salvar .env"
+    Write-Host "18. Ver versao e metadata de build"
+    Write-Host "19. Criar tag de release"
     Write-Host "0. Sair"
     Write-Host ""
 }
@@ -577,6 +761,11 @@ do {
             "15" { Enable-WindowsFirewallPorts }
             "16" { Remove-StackVolumes }
             "17" { Save-EnvFile }
+            "18" { Show-Version }
+            "19" {
+                $pushTag = Read-Host "Enviar a tag para origin agora? (s/N)"
+                New-ProjectTag -Push:($pushTag -match "(?i)^(s|sim|y|yes)$")
+            }
             "0" { break }
             default { Write-Host "Opcao invalida." -ForegroundColor Yellow }
         }

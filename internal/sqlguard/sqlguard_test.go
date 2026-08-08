@@ -58,11 +58,73 @@ func TestValidateDMLPolicy(t *testing.T) {
 	if blocked.Valid {
 		t.Fatalf("expected delete to be denied: %#v", blocked)
 	}
+	upsert := Validate("insert into public.users (id, email) values (1, 'x') on conflict (id) do update set email = excluded.email", testConnectionConfig(), ModeDML)
+	if upsert.Valid {
+		t.Fatalf("expected upsert to require an explicit update policy: %#v", upsert)
+	}
+	deleteCfg := testConnectionConfig()
+	deleteCfg.DMLPolicies[0].Operations = append(deleteCfg.DMLPolicies[0].Operations, "delete")
+	deleteUsing := Validate("delete from public.users using private.accounts where public.users.id = private.accounts.id", deleteCfg, ModeDML)
+	if deleteUsing.Valid {
+		t.Fatalf("expected DELETE USING to enforce every referenced schema: %#v", deleteUsing)
+	}
 }
 
 func TestValidateMultipleStatements(t *testing.T) {
 	result := Validate("select * from public.users; select * from public.accounts", testConnectionConfig(), ModeRead)
 	if result.Valid {
 		t.Fatalf("expected multiple statements to be denied: %#v", result)
+	}
+}
+
+func TestValidateRejectsParserBypasses(t *testing.T) {
+	for _, sql := range []string{
+		"select * from public.users -- from private.users",
+		"select * from public.users /* from private.users */",
+		"select * from public.users for update",
+		"select * from public.users, private.accounts",
+		"select * from public.users where id in (select id from private.accounts)",
+		"delete from public.users using private.accounts where public.users.id = private.accounts.id",
+		"select private.get_secret()",
+		"select pg_read_file('/etc/passwd')",
+		"select * from public.users; delete from public.users",
+	} {
+		result := Validate(sql, testConnectionConfig(), ModeRead)
+		if result.Valid {
+			t.Fatalf("expected unsafe SQL to be denied for %q: %#v", sql, result)
+		}
+	}
+	if result := Validate("select pg_catalog.now()", testConnectionConfig(), ModeRead); !result.Valid {
+		t.Fatalf("pg_catalog built-in functions should remain usable: %#v", result)
+	}
+}
+
+func TestValidateRejectsUnallowlistedDDL(t *testing.T) {
+	cfg := testConnectionConfig()
+	cfg.DDLEnabled = true
+	for _, sql := range []string{
+		"create schema public",
+		"create table public.copy (like private.users)",
+		"create table public.copy as table private.users",
+		"create table public.copy inherits (private.users)",
+		"create table public.copy partition of private.users",
+		"drop table public.users cascade",
+		"alter table public.users set schema private",
+		"truncate table public.users, public.accounts",
+	} {
+		result := Validate(sql, cfg, ModeDDL)
+		if result.Valid {
+			t.Fatalf("expected DDL to be denied for %q: %#v", sql, result)
+		}
+	}
+}
+
+func TestApplySelectLimitAlwaysCapsExistingLimit(t *testing.T) {
+	sql := ApplySelectLimit("select * from public.users limit 100000", 50)
+	if sql == "select * from public.users limit 100000" {
+		t.Fatal("existing LIMIT must still be capped by the configured limit")
+	}
+	if !HasLimit(sql) {
+		t.Fatalf("wrapped query must retain a LIMIT: %q", sql)
 	}
 }

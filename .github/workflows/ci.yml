@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Validate project version
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+
+      - name: Run tests with race detector
+        run: go test -race ./...
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Build
+        run: go build -trimpath -ldflags="-s -w -X github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version.Version=$(tr -d '\r\n' < VERSION) -X github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version.Commit=${GITHUB_SHA} -X github.com/sirvonfelsen/felsen_mcp_server_postgres/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./cmd/postgres-mcp
+
+      - name: Build container
+        run: docker build --file Docker/Dockerfile --build-arg VERSION_OVERRIDE=$(tr -d '\r\n' < VERSION) --build-arg BUILD_COMMIT=${GITHUB_SHA} --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) --tag postgres-mcp:ci .

@@ -30,4 +30,7 @@ func TestAuthenticateHeaderAndScopes(t *testing.T) {
 	if _, ok := manager.AuthenticateHeader("Bearer wrong-token"); ok {
 		t.Fatal("invalid token authenticated")
 	}
+	if _, ok := manager.AuthenticateHeader("secret-token"); ok {
+		t.Fatal("bare token must not authenticate")
+	}
 }
